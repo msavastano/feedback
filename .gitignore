@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets / auth
+.secret_key
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Per-user agent state (sessions, skills, profiles)
+data/
+
+# Legacy / consolidation side paths
+skills.old/
+skills.consolidated/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

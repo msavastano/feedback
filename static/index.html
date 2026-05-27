@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Skill-memory agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1115;
+    color: #e6e6e6;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; }
+  aside {
+    background: #14161c;
+    border-right: 1px solid #2a2d36;
+    padding: 12px;
+    overflow-y: auto;
+  }
+  aside h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #8a8f9c;
+    letter-spacing: 0.05em;
+    margin: 16px 0 6px;
+  }
+  aside ul { list-style: none; padding: 0; margin: 0; }
+  aside li {
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  aside li:hover { background: #1d2029; }
+  aside li.active { background: #2a2d36; }
+  aside .tier { font-size: 10px; color: #6e7383; margin-right: 6px; }
+  aside .meta { font-size: 11px; color: #6e7383; }
+  aside button.del {
+    background: transparent;
+    border: none;
+    color: #6e7383;
+    cursor: pointer;
+    float: right;
+    font-size: 11px;
+  }
+  aside button.del:hover { color: #e06060; }
+  main { display: flex; flex-direction: column; height: 100vh; }
+  header {
+    padding: 10px 16px;
+    border-bottom: 1px solid #2a2d36;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  header .who { font-weight: 600; }
+  header button {
+    background: #2a2d36;
+    color: #e6e6e6;
+    border: 1px solid #353945;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .msg { max-width: 720px; }
+  .msg.user { align-self: flex-end; background: #1f2a4a; padding: 8px 12px; border-radius: 8px; }
+  .msg.agent { align-self: flex-start; }
+  .msg .role { font-size: 10px; color: #8a8f9c; text-transform: uppercase; margin-bottom: 2px; }
+  .msg .body { white-space: pre-wrap; }
+  .badges {
+    font-size: 10px;
+    color: #8a8f9c;
+    margin-top: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .badge { background: #1d2029; padding: 2px 6px; border-radius: 3px; }
+  .badge.sys { color: #88c0d0; }
+  .badge.act { color: #a3be8c; }
+  .badge.arc { color: #d08770; }
+  .badge.tok { color: #6e7383; }
+  .badge.meta { color: #8a8f9c; }
+  aside .stats {
+    font-size: 11px;
+    color: #6e7383;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    background: #14161c;
+    border: 1px solid #2a2d36;
+    border-radius: 4px;
+  }
+  aside .stats .pill {
+    display: inline-block;
+    margin-right: 6px;
+  }
+  aside .stats .pill.sys { color: #88c0d0; }
+  aside .stats .pill.act { color: #a3be8c; }
+  aside .stats .pill.arc { color: #d08770; }
+  aside .stats .pill.merge {
+    color: #ebcb8b;
+    cursor: help;
+  }
+  aside button.consolidate {
+    width: 100%;
+    background: #14161c;
+    color: #ebcb8b;
+    border: 1px solid #2a2d36;
+    padding: 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 6px;
+    font-size: 12px;
+  }
+  aside button.consolidate:hover { background: #1d2029; }
+  aside button.consolidate:disabled { opacity: 0.5; cursor: default; }
+  .pending {
+    align-self: flex-start;
+    color: #a3be8c;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #14161c;
+    border: 1px solid #2a2d36;
+    border-radius: 8px;
+    max-width: 720px;
+  }
+  .pending .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid #2a2d36;
+    border-top-color: #a3be8c;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  .pending .trace {
+    font-size: 11px;
+    color: #6e7383;
+    margin-top: 4px;
+    white-space: pre;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  form#composer {
+    border-top: 1px solid #2a2d36;
+    padding: 10px 16px;
+    display: flex;
+    gap: 8px;
+  }
+  #composer textarea {
+    flex: 1;
+    background: #14161c;
+    color: #e6e6e6;
+    border: 1px solid #2a2d36;
+    border-radius: 4px;
+    padding: 8px;
+    font: inherit;
+    resize: none;
+    min-height: 48px;
+  }
+  #composer button {
+    background: #4c6ef5;
+    color: white;
+    border: none;
+    padding: 0 18px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  #composer button:disabled { opacity: 0.5; }
+  /* login overlay */
+  #login {
+    position: fixed;
+    inset: 0;
+    background: #0f1115;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  #login.show { display: flex; }
+  #login .card {
+    background: #14161c;
+    border: 1px solid #2a2d36;
+    padding: 24px;
+    border-radius: 8px;
+    min-width: 280px;
+  }
+  #login h1 { margin: 0 0 16px; font-size: 18px; }
+  #login .user {
+    padding: 10px 12px;
+    border: 1px solid #2a2d36;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    cursor: pointer;
+  }
+  #login .user:hover { background: #1d2029; }
+  .empty { color: #6e7383; font-style: italic; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div id="login">
+  <div class="card">
+    <h1>Sign in</h1>
+    <div id="googleBtnContainer"></div>
+    <p id="loginError" style="color:#e06060;font-size:12px;margin-top:12px;display:none"></p>
+    <p id="loginHint" style="color:#6e7383;font-size:11px;margin-top:12px;">
+      Sign in with Google to continue.
+    </p>
+  </div>
+</div>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
+<div id="app" style="display:none">
+  <aside>
+    <button id="newSession" style="width:100%;background:#4c6ef5;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;margin-bottom:8px">+ New chat</button>
+    <h2>Sessions</h2>
+    <ul id="sessions"></ul>
+    <h2>Skills</h2>
+    <div class="stats" id="skillStats" style="display:none"></div>
+    <button class="consolidate" id="consolidateBtn" style="display:none">Consolidate sessions…</button>
+    <ul id="skills"></ul>
+  </aside>
+  <main>
+    <header>
+      <div class="who" id="who"></div>
+      <div>
+        <button id="endSession">End session</button>
+        <button id="logout">Logout</button>
+      </div>
+    </header>
+    <div id="chat"></div>
+    <form id="composer">
+      <textarea id="input" placeholder="Type your message…" rows="2"></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let sessionId = null;
+let me = null;
+let turnsThisSession = 0;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (r.status === 401) {
+    showLogin();
+    throw new Error("unauthorized");
+  }
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+async function onGoogleSignIn(response) {
+  $("loginError").style.display = "none";
+  try {
+    const r = await fetch("/api/login/google", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential: response.credential }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`${r.status} ${txt}`);
+    }
+    location.reload();
+  } catch (e) {
+    $("loginError").textContent = `Login failed: ${e.message}`;
+    $("loginError").style.display = "block";
+  }
+}
+window.onGoogleSignIn = onGoogleSignIn;
+
+async function showLogin() {
+  $("app").style.display = "none";
+  $("login").classList.add("show");
+  $("loginError").style.display = "none";
+
+  const cfg = await fetch("/api/config").then((r) => r.json()).catch(() => ({}));
+  const clientId = cfg.google_client_id;
+  const container = $("googleBtnContainer");
+  container.innerHTML = "";
+
+  if (!clientId) {
+    $("loginError").textContent =
+      "GOOGLE_CLIENT_ID not configured on server. Set the env var and restart.";
+    $("loginError").style.display = "block";
+    return;
+  }
+
+  const renderBtn = () => {
+    if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+      setTimeout(renderBtn, 100);
+      return;
+    }
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+      callback: onGoogleSignIn,
+    });
+    window.google.accounts.id.renderButton(container, {
+      type: "standard",
+      theme: "filled_black",
+      size: "large",
+      text: "signin_with",
+      shape: "rectangular",
+    });
+  };
+  renderBtn();
+}
+
+function renderBadges(loaded, tokens, meta) {
+  const parts = [];
+  for (const n of loaded.system || []) parts.push(`<span class="badge sys">sys:${n}</span>`);
+  for (const n of loaded.active || []) parts.push(`<span class="badge act">act:${n}</span>`);
+  for (const n of loaded.archive || []) parts.push(`<span class="badge arc">arc:${n}</span>`);
+  if (tokens && tokens.total) {
+    parts.push(`<span class="badge tok">in:${tokens.in} out:${tokens.out} total:${tokens.total}</span>`);
+  }
+  if (meta) {
+    const memTip = `catalog:${meta.catalog} scoped_bodies:${meta.scoped_bodies} body_chars:${meta.scoped_body_chars}/${meta.total_body_chars} history:${meta.history_sent}/${meta.history_full}`;
+    parts.push(`<span class="badge meta" title="${escapeHtml(memTip)}">memory: ${meta.scoped_bodies}/${meta.catalog} skills · ${meta.scoped_body_chars}ch</span>`);
+  }
+  return parts.length ? `<div class="badges">${parts.join("")}</div>` : "";
+}
+
+function appendMessage(role, text, loaded = null, tokens = null, meta = null) {
+  const div = document.createElement("div");
+  div.className = `msg ${role}`;
+  div.innerHTML = `<div class="role">${role}</div><div class="body"></div>`;
+  div.querySelector(".body").textContent = text;
+  if (loaded) div.insertAdjacentHTML("beforeend", renderBadges(loaded, tokens, meta));
+  $("chat").appendChild(div);
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+async function refreshSidebar() {
+  const [sessions, skills] = await Promise.all([
+    api("/api/sessions"),
+    api("/api/skills"),
+  ]);
+  const sList = $("sessions");
+  sList.innerHTML = sessions.length
+    ? ""
+    : '<li class="empty">none yet</li>';
+  for (const s of sessions) {
+    const li = document.createElement("li");
+    if (s.session_id === sessionId) li.classList.add("active");
+    li.innerHTML = `<div>${escapeHtml(s.first_message || "(empty)")}</div><div class="meta">${s.turns} turns · ${s.last_ts.slice(0, 16)}</div>`;
+    sList.appendChild(li);
+  }
+  const skList = $("skills");
+  skList.innerHTML = skills.length
+    ? ""
+    : '<li class="empty">no memories yet</li>';
+  for (const s of skills) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="tier">[${s.tier[0]}]</span>${escapeHtml(s.name)}<button class="del" data-name="${escapeHtml(s.name)}">×</button><div class="meta">${escapeHtml(s.description)}</div>`;
+    li.querySelector(".del").onclick = async (e) => {
+      e.stopPropagation();
+      const name = e.target.dataset.name;
+      if (!confirm(`Delete skill "${name}"?`)) return;
+      await api(`/api/skill/${encodeURIComponent(name)}`, { method: "DELETE" });
+      refreshSidebar();
+    };
+    skList.appendChild(li);
+  }
+
+  // catalog stats
+  const counts = { system: 0, active: 0, archive: 0 };
+  let sessionRollups = 0;
+  for (const s of skills) {
+    counts[s.tier] = (counts[s.tier] || 0) + 1;
+    if (s.tier === "active" && s.name.startsWith("session-")) sessionRollups += 1;
+  }
+  if (skills.length) {
+    const parts = [
+      `<span class="pill sys">sys ${counts.system}</span>`,
+      `<span class="pill act">act ${counts.active}</span>`,
+      `<span class="pill arc">arc ${counts.archive}</span>`,
+    ];
+    if (sessionRollups >= 1) {
+      parts.push(
+        `<span class="pill merge" title="${sessionRollups} session-* rollups in active tier — merge them into archive with the button below">⚑ ${sessionRollups} rollups</span>`,
+      );
+    }
+    $("skillStats").innerHTML = parts.join("");
+    $("skillStats").style.display = "block";
+  } else {
+    $("skillStats").style.display = "none";
+  }
+  $("consolidateBtn").style.display = sessionRollups >= 3 ? "block" : "none";
+  $("consolidateBtn").textContent = `Consolidate ${sessionRollups} sessions…`;
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function createPending() {
+  const div = document.createElement("div");
+  div.className = "pending";
+  div.innerHTML = `
+    <div class="spinner"></div>
+    <div>
+      <div class="status">Starting…</div>
+      <div class="trace"></div>
+    </div>`;
+  $("chat").appendChild(div);
+  $("chat").scrollTop = $("chat").scrollHeight;
+  const trace = [];
+  return {
+    update(msg) {
+      div.querySelector(".status").textContent = msg;
+      trace.push(msg);
+      div.querySelector(".trace").textContent = trace.slice(0, -1).join(" → ");
+      $("chat").scrollTop = $("chat").scrollHeight;
+    },
+    remove() {
+      div.remove();
+    },
+  };
+}
+
+async function send(message) {
+  appendMessage("user", message);
+  $("send").disabled = true;
+  const pending = createPending();
+  let finalEvent = null;
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, message }),
+    });
+    if (res.status === 401) {
+      pending.remove();
+      showLogin();
+      return;
+    }
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        const s = line.trim();
+        if (!s) continue;
+        let ev;
+        try { ev = JSON.parse(s); } catch { continue; }
+        handleStreamEvent(ev, pending, (f) => (finalEvent = f));
+      }
+    }
+    if (buf.trim()) {
+      try {
+        handleStreamEvent(JSON.parse(buf), pending, (f) => (finalEvent = f));
+      } catch {}
+    }
+    pending.remove();
+    if (finalEvent) {
+      appendMessage("agent", finalEvent.answer, finalEvent.loaded, finalEvent.tokens, finalEvent.meta);
+      if (finalEvent.edits && finalEvent.edits.length) {
+        const note = document.createElement("div");
+        note.className = "badges";
+        note.style.alignSelf = "flex-start";
+        note.innerHTML = finalEvent.edits
+          .map((e) => `<span class="badge act">memory: ${escapeHtml(e)}</span>`)
+          .join("");
+        $("chat").appendChild(note);
+      }
+      turnsThisSession += 1;
+      refreshSidebar();
+    }
+  } catch (e) {
+    pending.remove();
+    appendMessage("agent", `[error: ${e.message}]`);
+  } finally {
+    $("send").disabled = false;
+  }
+}
+
+function handleStreamEvent(ev, pending, setFinal) {
+  if (ev.stage === "init" && ev.session_id) {
+    sessionId = ev.session_id;
+    return;
+  }
+  if (ev.stage === "error") {
+    pending.update(`error: ${ev.msg}`);
+    return;
+  }
+  if (ev.stage === "done") {
+    setFinal(ev);
+    return;
+  }
+  if (ev.msg) pending.update(ev.msg);
+}
+
+async function init() {
+  try {
+    const r = await fetch("/api/me", { credentials: "same-origin" });
+    if (r.status === 401) {
+      await showLogin();
+      return;
+    }
+    if (!r.ok) throw new Error(`/api/me ${r.status}`);
+    me = await r.json();
+  } catch (e) {
+    console.error("init failed:", e);
+    await showLogin();
+    return;
+  }
+  $("login").classList.remove("show");
+  $("app").style.display = "grid";
+  $("who").innerHTML = `${escapeHtml(me.display_name)} <span style="color:#6e7383;font-weight:400;font-size:11px;margin-left:8px">${escapeHtml(me.model || "")}</span>`;
+  refreshSidebar();
+}
+
+$("composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = $("input").value.trim();
+  if (!v) return;
+  $("input").value = "";
+  send(v);
+});
+
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+$("newSession").onclick = () => {
+  flushSessionBeacon();
+  sessionId = null;
+  turnsThisSession = 0;
+  $("chat").innerHTML = "";
+};
+
+$("endSession").onclick = async () => {
+  if (!sessionId) return;
+  const res = await api("/api/session/end", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);
+  sessionId = null;
+  turnsThisSession = 0;
+  $("chat").innerHTML = "";
+  refreshSidebar();
+};
+
+$("logout").onclick = async () => {
+  flushSessionBeacon();
+  await fetch("/api/logout", { method: "POST" });
+  location.reload();
+};
+
+$("consolidateBtn").onclick = async () => {
+  const btn = $("consolidateBtn");
+  if (!confirm("Run consolidation? Original skills tree untouched — output written to skills.consolidated/ side path for manual review.")) return;
+  btn.disabled = true;
+  btn.textContent = "Consolidating…";
+  try {
+    const res = await api("/api/consolidate", {
+      method: "POST",
+      body: JSON.stringify({ dry_run: false }),
+    });
+    let msg;
+    if (res.skipped_idempotent) {
+      msg = `Already consolidated (no changes since last run).\nSide path: ${res.out_path}`;
+    } else if (res.merged_archive_skill) {
+      msg = `Merged ${res.input_sessions} session rollups → ${res.merged_archive_skill}\nReview: ${res.out_path}`;
+    } else {
+      msg = res.reason || "Nothing to consolidate.";
+    }
+    alert(msg);
+    refreshSidebar();
+  } catch (e) {
+    alert(`Consolidate failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+function flushSessionBeacon() {
+  if (!sessionId || turnsThisSession < 1) return;
+  try {
+    const blob = new Blob(
+      [JSON.stringify({ session_id: sessionId })],
+      { type: "application/json" },
+    );
+    navigator.sendBeacon("/api/session/end", blob);
+  } catch (e) {
+    // best-effort
+  }
+}
+
+window.addEventListener("pagehide", flushSessionBeacon);
+window.addEventListener("beforeunload", flushSessionBeacon);
+
+init();
+</script>
+</body>
+</html>
