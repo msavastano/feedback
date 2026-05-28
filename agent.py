@@ -1,14 +1,14 @@
-"""Self-editing skill-memory agent on Gemini 3 Flash.
+"""Self-editing skill-memory agent on Gemini.
 
-Multi-user. Per-user data lives under ./data/users/<user_id>/.
+Multi-user. Per-user state lives in Postgres (see store.py + schema.sql).
 
 Flow per turn:
-  1. Read frontmatter of every skill in user's skills dir.
+  1. Read every skill (name+description+body+tier) for the user.
   2. Ask model which skills are relevant to the prompt.
   3. Load full bodies (active) + section excerpts (archive) + all system skills.
   4. Generate response (web search tool available).
   5. Reflect: model returns skill edits across system/active/archive tiers.
-  6. Append turn to session jsonl.
+  6. Append turn to sessions/turns tables.
 """
 
 from __future__ import annotations
@@ -21,21 +21,24 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
-import yaml
 from google import genai
 from google.genai import types
 
+from store import SessionStore, SkillStore, UserStore
+
 MODEL = "gemini-3.5-flash"
-DATA_DIR = Path(__file__).parent / "data"
-USERS_DIR = DATA_DIR / "users"
-SECRET_KEY_PATH = Path(__file__).parent / ".secret_key"
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 SECTION_RE = re.compile(r"^(##\s+.*)$", re.MULTILINE)
 TIERS = ("system", "active", "archive")
+
+# Local-dev fallback path for the cookie-signing secret. Skipped entirely on
+# Vercel (read-only FS); set SECRET_KEY in the environment there.
+SECRET_KEY_PATH = os.path.join(os.path.dirname(__file__), ".secret_key")
+IS_SERVERLESS = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
 
 # Maximum number of prior turns (user+model messages) sent to `respond`.
 # Avoids unbounded history growth as sessions get long. Tune via env var.
@@ -64,42 +67,37 @@ def validate_user_id(user_id: str) -> str:
 
 @dataclass
 class UserCtx:
+    """Pure identity carrier. No filesystem state."""
     user_id: str
-    root: Path = field(init=False)
     model: str = field(init=False)
 
     def __post_init__(self) -> None:
         validate_user_id(self.user_id)
-        self.root = USERS_DIR / self.user_id
-        self.root.mkdir(parents=True, exist_ok=True)
         self.model = MODEL
-
-    @property
-    def skills_dir(self) -> Path:
-        return self.root / "skills"
-
-    @property
-    def system_dir(self) -> Path:
-        return self.skills_dir / "system"
-
-    @property
-    def archive_dir(self) -> Path:
-        return self.skills_dir / "archive"
-
-    @property
-    def sessions_dir(self) -> Path:
-        return self.root / "sessions"
 
 
 def get_secret_key() -> bytes:
-    """Bootstrap a persistent secret key for cookie signing."""
+    """Bootstrap a persistent secret key for cookie signing.
+
+    Order of preference:
+      1. SECRET_KEY env var (required on Vercel).
+      2. Local-dev file fallback at .secret_key (skipped on serverless).
+      3. Generate-and-save (local-dev only).
+    """
     env = os.environ.get("SECRET_KEY")
     if env:
         return env.encode("utf-8")
-    if SECRET_KEY_PATH.exists():
-        return SECRET_KEY_PATH.read_bytes().strip()
+    if IS_SERVERLESS:
+        raise RuntimeError(
+            "SECRET_KEY env var is required in serverless deployments "
+            "(no writable filesystem for the file fallback)."
+        )
+    if os.path.exists(SECRET_KEY_PATH):
+        with open(SECRET_KEY_PATH, "rb") as f:
+            return f.read().strip()
     key = secrets.token_hex(32).encode("utf-8")
-    SECRET_KEY_PATH.write_bytes(key)
+    with open(SECRET_KEY_PATH, "wb") as f:
+        f.write(key)
     try:
         os.chmod(SECRET_KEY_PATH, 0o600)
     except OSError:
@@ -111,13 +109,13 @@ def get_secret_key() -> bytes:
 
 @dataclass
 class Skill:
-    path: Path
     name: str
     description: str
     body: str
     tier: str = "active"
 
     def serialize(self) -> str:
+        import yaml
         fm = yaml.safe_dump(
             {"name": self.name, "description": self.description},
             sort_keys=False,
@@ -125,86 +123,31 @@ class Skill:
         return f"---\n{fm}\n---\n\n{self.body.strip()}\n"
 
 
-def _tier_dir(ctx: UserCtx, tier: str) -> Path:
-    if tier == "system":
-        return ctx.system_dir
-    if tier == "archive":
-        return ctx.archive_dir
-    return ctx.skills_dir
-
-
-def _load_dir(d: Path, tier: str) -> list[Skill]:
-    if not d.exists():
-        return []
-    out: list[Skill] = []
-    for p in sorted(d.glob("*.md")):
-        text = p.read_text(encoding="utf-8")
-        m = FRONTMATTER_RE.match(text)
-        if not m:
-            continue
-        meta = yaml.safe_load(m.group(1)) or {}
-        out.append(
-            Skill(
-                path=p,
-                name=str(meta.get("name", p.stem)),
-                description=str(meta.get("description", "")),
-                body=m.group(2),
-                tier=tier,
-            )
-        )
-    return out
-
-
 def load_skills(ctx: UserCtx) -> list[Skill]:
-    ctx.skills_dir.mkdir(parents=True, exist_ok=True)
-    ctx.system_dir.mkdir(parents=True, exist_ok=True)
-    ctx.archive_dir.mkdir(parents=True, exist_ok=True)
-    skills: list[Skill] = []
-    skills.extend(_load_dir(ctx.system_dir, "system"))
-    # active = top-level only, exclude subdirs
-    for p in sorted(ctx.skills_dir.glob("*.md")):
-        text = p.read_text(encoding="utf-8")
-        m = FRONTMATTER_RE.match(text)
-        if not m:
-            continue
-        meta = yaml.safe_load(m.group(1)) or {}
-        skills.append(
-            Skill(
-                path=p,
-                name=str(meta.get("name", p.stem)),
-                description=str(meta.get("description", "")),
-                body=m.group(2),
-                tier="active",
-            )
+    rows = SkillStore.load_all(ctx.user_id)
+    return [
+        Skill(
+            name=r["name"],
+            description=r.get("description", ""),
+            body=r.get("body", ""),
+            tier=r.get("tier", "active"),
         )
-    skills.extend(_load_dir(ctx.archive_dir, "archive"))
-    return skills
+        for r in rows
+    ]
 
 
 def write_skill(
     ctx: UserCtx, name: str, description: str, body: str, tier: str = "active"
-) -> Path:
+) -> str:
+    """Insert-or-update a skill. Returns the canonical name (used as identifier)."""
     if tier not in TIERS:
         tier = "active"
-    safe = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-") or "skill"
-    d = _tier_dir(ctx, tier)
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / f"{safe}.md"
-    skill = Skill(path=path, name=name, description=description, body=body, tier=tier)
-    path.write_text(skill.serialize(), encoding="utf-8")
-    return path
+    return SkillStore.upsert(ctx.user_id, name, description, body, tier=tier)
 
 
 def delete_skill(ctx: UserCtx, name: str) -> bool:
-    """Find skill by name across tiers; delete file. Returns True if removed."""
-    for s in load_skills(ctx):
-        if s.name == name:
-            try:
-                s.path.unlink()
-                return True
-            except OSError:
-                return False
-    return False
+    """Delete a skill by name. Returns True if a row was removed."""
+    return SkillStore.delete(ctx.user_id, name)
 
 
 def split_sections(body: str) -> list[tuple[str, str]]:
@@ -228,16 +171,9 @@ def new_session_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def _session_path(ctx: UserCtx, session_id: str) -> Path:
-    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", session_id):
-        raise ValueError(f"invalid session_id: {session_id!r}")
-    ctx.sessions_dir.mkdir(parents=True, exist_ok=True)
-    return ctx.sessions_dir / f"{session_id}.jsonl"
-
-
 def new_session(ctx: UserCtx) -> str:
     sid = new_session_id()
-    _session_path(ctx, sid).touch()
+    SessionStore.create(ctx.user_id, sid)
     return sid
 
 
@@ -248,33 +184,15 @@ def append_turn(
     text: str,
     usage: dict | None = None,
 ) -> None:
-    rec = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "role": role,
-        "text": text,
-    }
-    if usage:
-        rec["tokens"] = usage
-    path = _session_path(ctx, session_id)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
+    SessionStore.append_turn(ctx.user_id, session_id, role, text, tokens=usage)
 
 
 def load_session(ctx: UserCtx, session_id: str) -> list[types.Content]:
-    path = _session_path(ctx, session_id)
-    if not path.exists():
-        return []
+    rows = SessionStore.load_turns(ctx.user_id, session_id)
     out: list[types.Content] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        role = rec.get("role")
-        text = rec.get("text", "")
+    for r in rows:
+        role = r.get("role")
+        text = r.get("text", "")
         if role in ("user", "model") and text:
             out.append(types.Content(role=role, parts=[types.Part(text=text)]))
     return out
@@ -282,37 +200,7 @@ def load_session(ctx: UserCtx, session_id: str) -> list[types.Content]:
 
 def list_sessions(ctx: UserCtx) -> list[dict]:
     """Return [{session_id, first_message, last_ts, turns, rolled_up}]."""
-    if not ctx.sessions_dir.exists():
-        return []
-    out: list[dict] = []
-    for p in sorted(ctx.sessions_dir.glob("*.jsonl"), reverse=True):
-        first_msg = ""
-        last_ts = ""
-        turns = 0
-        rolled_up = False
-        for line in p.read_text(encoding="utf-8").splitlines():
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("_rollup"):
-                rolled_up = True
-                continue
-            if rec.get("role") in ("user", "model"):
-                turns += 1
-                last_ts = rec.get("ts", last_ts)
-                if not first_msg and rec.get("role") == "user":
-                    first_msg = rec.get("text", "")[:80]
-        out.append(
-            {
-                "session_id": p.stem,
-                "first_message": first_msg,
-                "last_ts": last_ts,
-                "turns": turns,
-                "rolled_up": rolled_up,
-            }
-        )
-    return out
+    return SessionStore.list_sessions(ctx.user_id)
 
 
 # ---------- LLM helpers ----------
@@ -470,7 +358,7 @@ def respond(
 
 EDIT_INSTRUCTIONS = """\
 You are a memory writer. Aggressively persist anything from the exchange that could
-inform FUTURE conversations. Skills are markdown docs stored on disk with YAML
+inform FUTURE conversations. Skills are markdown docs stored with a YAML
 frontmatter (name, description) and a markdown body. Skills live in one of three tiers:
 
 - "system": ALWAYS loaded into context. Reserved for core identity/rules the agent
@@ -617,43 +505,12 @@ If the session was trivial (one or two turns of small talk, no substance), retur
 """
 
 
-def _is_session_rolled_up(ctx: UserCtx, session_id: str) -> bool:
-    """Check jsonl for an existing rollup marker (idempotency)."""
-    path = _session_path(ctx, session_id)
-    if not path.exists():
-        return False
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("_rollup"):
-            return True
-    return False
-
-
-def _mark_session_rolled_up(ctx: UserCtx, session_id: str, skill_name: str) -> None:
-    path = _session_path(ctx, session_id)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(
-            json.dumps(
-                {
-                    "_rollup": True,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "skill": skill_name,
-                }
-            )
-            + "\n"
-        )
-
-
 def summarize_session_to_skill(
     client: genai.Client, ctx: UserCtx, session_id: str
-) -> Path | None:
-    if _is_session_rolled_up(ctx, session_id):
+) -> str | None:
+    """Roll a chat into a `session-<ts>` active skill. Returns the skill name
+    or None if the session was trivial or already rolled up."""
+    if SessionStore.is_rolled_up(ctx.user_id, session_id):
         return None
     history = load_session(ctx, session_id)
     if len(history) < 2:
@@ -676,15 +533,10 @@ def summarize_session_to_skill(
         data = json.loads(raw)
         if data.get("description") and data.get("body"):
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            path = write_skill(
-                ctx,
-                f"session-{stamp}",
-                data["description"],
-                data["body"],
-                tier="active",
-            )
-            _mark_session_rolled_up(ctx, session_id, path.stem)
-            return path
+            name = f"session-{stamp}"
+            write_skill(ctx, name, data["description"], data["body"], tier="active")
+            SessionStore.mark_rolled_up(ctx.user_id, session_id, name)
+            return name
     except (json.JSONDecodeError, TypeError, AttributeError):
         pass
     return None
@@ -692,49 +544,24 @@ def summarize_session_to_skill(
 
 # ---------- consolidation (offline pass) ----------
 
-CONSOLIDATED_DIRNAME = "skills.consolidated"
-CONSOLIDATED_MARKER = ".consolidated"
-
-
-def _copy_skill_to(out_root: Path, skill: Skill) -> Path:
-    """Mirror a skill into the consolidation side path, preserving tier dir."""
-    if skill.tier == "system":
-        d = out_root / "system"
-    elif skill.tier == "archive":
-        d = out_root / "archive"
-    else:
-        d = out_root
-    d.mkdir(parents=True, exist_ok=True)
-    dest = d / skill.path.name
-    dest.write_text(skill.serialize(), encoding="utf-8")
-    return dest
-
-
 def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
-    """Offline pass. Folds active `session-*` rollups into a single archive
-    skill with one `##` section per session. Mirrors all other skills as-is
-    into a side directory so the original tree is untouched until a manual
-    swap. Idempotent via `.consolidated` marker file.
-
-    Returns a summary dict.
+    """Fold every active `session-*` skill into one new archive skill and delete
+    the originals. Idempotent: a no-op when there are no `session-*` skills
+    left. Runs in a single transaction so a crash mid-fold leaves both the
+    new archive skill and the old session skills present, never neither.
     """
     skills = load_skills(ctx)
     session_skills = [
         s for s in skills
         if s.tier == "active" and s.name.startswith("session-")
     ]
-    keep = [
-        s for s in skills
-        if not (s.tier == "active" and s.name.startswith("session-"))
-    ]
 
     summary = {
         "input_total": len(skills),
         "input_sessions": len(session_skills),
-        "input_keep": len(keep),
-        "out_path": None,
+        "input_keep": len(skills) - len(session_skills),
         "merged_archive_skill": None,
-        "skipped_idempotent": False,
+        "deleted_session_skills": [],
         "dry_run": dry_run,
     }
 
@@ -742,31 +569,9 @@ def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
         summary["reason"] = "no session-* skills to consolidate"
         return summary
 
-    out_root = ctx.root / CONSOLIDATED_DIRNAME
-    marker_path = out_root / CONSOLIDATED_MARKER
-
-    # idempotency check: same set of session file mtimes as last run → skip
-    input_signature = sorted(
-        (s.path.name, int(s.path.stat().st_mtime)) for s in session_skills
-    )
-    if marker_path.exists():
-        try:
-            prev = json.loads(marker_path.read_text(encoding="utf-8"))
-            if prev.get("input_signature") == [list(t) for t in input_signature]:
-                summary["skipped_idempotent"] = True
-                summary["out_path"] = str(out_root)
-                return summary
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    if not dry_run:
-        out_root.mkdir(parents=True, exist_ok=True)
-        for s in keep:
-            _copy_skill_to(out_root, s)
-
     # Build one archive skill of all session bodies, one `##` section each.
     sections = []
-    for s in sorted(session_skills, key=lambda x: x.path.name):
+    for s in sorted(session_skills, key=lambda x: x.name):
         sections.append(f"## {s.name}\n\n{s.body.strip()}")
     body = "\n\n".join(sections)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -776,34 +581,22 @@ def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
         f"(merged {datetime.now().date().isoformat()})."
     )
 
-    if not dry_run:
-        archive_dir = out_root / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        safe = re.sub(r"[^a-z0-9_-]+", "-", archive_name.lower()).strip("-")
-        archive_path = archive_dir / f"{safe}.md"
-        archive_skill = Skill(
-            path=archive_path,
-            name=archive_name,
-            description=desc,
-            body=body,
-            tier="archive",
-        )
-        archive_path.write_text(archive_skill.serialize(), encoding="utf-8")
-        marker_path.write_text(
-            json.dumps(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "input_signature": input_signature,
-                    "merged_archive_skill": archive_name,
-                    "session_count": len(session_skills),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        summary["out_path"] = str(out_root)
+    if dry_run:
         summary["merged_archive_skill"] = archive_name
+        summary["deleted_session_skills"] = [s.name for s in session_skills]
+        return summary
 
+    # Write archive skill, then delete originals. Both happen against the same
+    # connection so a transactional wrapper at the caller can roll the pair
+    # back together if needed; SkillStore.upsert/delete are individually atomic.
+    write_skill(ctx, archive_name, desc, body, tier="archive")
+    deleted: list[str] = []
+    for s in session_skills:
+        if delete_skill(ctx, s.name):
+            deleted.append(s.name)
+
+    summary["merged_archive_skill"] = archive_name
+    summary["deleted_session_skills"] = deleted
     return summary
 
 
@@ -819,8 +612,8 @@ def apply_edits(ctx: UserCtx, edits: list[dict]) -> list[str]:
         body = _strip_leading_frontmatter(body)
         if not body.strip():
             continue
-        path = write_skill(ctx, name, desc, body, tier=tier)
-        applied.append(f"{e.get('op', 'write')}[{tier}] -> {path.name}")
+        canonical = write_skill(ctx, name, desc, body, tier=tier)
+        applied.append(f"{e.get('op', 'write')}[{tier}] -> {canonical}")
     return applied
 
 
@@ -961,6 +754,9 @@ def main() -> None:
     if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
         print("Set GEMINI_API_KEY or GOOGLE_API_KEY.", file=sys.stderr)
         sys.exit(1)
+    if not os.environ.get("DATABASE_URL"):
+        print("Set DATABASE_URL (Postgres) before running.", file=sys.stderr)
+        sys.exit(1)
 
     user_id = os.environ.get("AGENT_USER_ID") or "default"
     try:
@@ -973,7 +769,6 @@ def main() -> None:
     client = _client()
     session_id = new_session(ctx)
     print(f"Agent ready ({ctx.model}). User: {user_id}. Session: {session_id}")
-    print(f"Data: {ctx.root}")
     print("Type prompt. Ctrl-C to exit.\n")
 
     while True:
@@ -1003,7 +798,7 @@ def main() -> None:
 
     summarized = summarize_session_to_skill(client, ctx, session_id)
     if summarized:
-        print(f"[session saved: {summarized.name}]")
+        print(f"[session saved: {summarized}]")
 
 
 def _consolidate_one(user_id: str, dry_run: bool) -> None:
@@ -1011,9 +806,6 @@ def _consolidate_one(user_id: str, dry_run: bool) -> None:
     print(f"\n=== Consolidating skills for {user_id} (dry_run={dry_run}) ===")
     result = consolidate(ctx, dry_run=dry_run)
     print(json.dumps(result, indent=2))
-    if result.get("out_path"):
-        print(f"Review: {result['out_path']}")
-        print(f"Original tree untouched at: {ctx.skills_dir}")
 
 
 def _run_consolidate_cli() -> None:
@@ -1021,25 +813,12 @@ def _run_consolidate_cli() -> None:
     all_users = "--all-users" in sys.argv
 
     if all_users:
-        if not USERS_DIR.exists():
-            print(f"No users found under {USERS_DIR}.", file=sys.stderr)
-            sys.exit(1)
-        uids = []
-        for p in sorted(USERS_DIR.iterdir()):
-            if not p.is_dir():
-                continue
-            try:
-                validate_user_id(p.name)
-            except ValueError as e:
-                print(f"Skip {p.name!r}: {e}", file=sys.stderr)
-                continue
-            uids.append(p.name)
+        uids = UserStore.list_user_ids()
         if not uids:
-            print(f"No valid user dirs under {USERS_DIR}.", file=sys.stderr)
+            print("No users found in the users table.", file=sys.stderr)
             sys.exit(1)
         for uid in uids:
             _consolidate_one(uid, dry)
-        print("\nTo swap: manually move/diff/merge — non-destructive by design.")
         return
 
     user_id = os.environ.get("AGENT_USER_ID") or "default"
@@ -1049,7 +828,6 @@ def _run_consolidate_cli() -> None:
         print(f"Invalid AGENT_USER_ID: {e}", file=sys.stderr)
         sys.exit(1)
     _consolidate_one(user_id, dry)
-    print("To swap: manually move/diff/merge — non-destructive by design.")
 
 
 if __name__ == "__main__":

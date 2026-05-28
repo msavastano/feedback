@@ -6,8 +6,11 @@ Downstream code is identity-source-agnostic — cookie payload is
 `{"user_id": "..."}` regardless of how the user was authenticated.
 
 `user_id` is derived from the email local-part (with `+tag` stripped and `.`
-replaced by `-`) so filesystem paths under `data/users/<user_id>/` stay readable.
-Collisions across email domains are intentional for personal/loopback use.
+replaced by `-`) so it stays a stable, URL-safe identifier. Collisions across
+email domains are intentional for personal/loopback use.
+
+All persistent state lives in Postgres (see store.py + schema.sql). Designed
+for Vercel: no filesystem writes outside `/tmp`.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google.auth.transport import requests as google_requests
@@ -39,12 +42,15 @@ from agent import (
     summarize_session_to_skill,
     validate_user_id,
 )
+from store import UserStore, get_pool
 
 STATIC_DIR = Path(__file__).parent / "static"
 COOKIE_NAME = "agent_user"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+CONSOLIDATE_TOKEN = os.environ.get("CONSOLIDATE_TOKEN", "").strip()
+CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()  # Vercel Cron auto-injects
 
 app = FastAPI(title="Skill-memory agent")
 
@@ -57,27 +63,6 @@ def _user_id_from_email(email: str) -> str:
     local = local.split("+", 1)[0]
     local = local.replace(".", "-")
     return local
-
-
-def _profile_path(user_id: str) -> Path:
-    return UserCtx(user_id=user_id).root / "profile.json"
-
-
-def _load_profile(user_id: str) -> dict:
-    p = _profile_path(user_id)
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_profile(user_id: str, profile: dict) -> None:
-    p = _profile_path(user_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(profile, indent=2), encoding="utf-8")
 
 
 # ---------- auth ----------
@@ -113,6 +98,19 @@ def api_config() -> dict:
     return {"google_client_id": GOOGLE_CLIENT_ID}
 
 
+@app.get("/api/health")
+def api_health() -> dict:
+    """Readiness check — verifies the DB pool can hand out a connection."""
+    try:
+        with get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"db unavailable: {e}")
+
+
 @app.post("/api/login/google")
 def api_login_google(body: GoogleLoginBody, response: Response) -> dict:
     if not GOOGLE_CLIENT_ID:
@@ -143,7 +141,7 @@ def api_login_google(body: GoogleLoginBody, response: Response) -> dict:
         "sub": info.get("sub", ""),
         "picture": info.get("picture", ""),
     }
-    _save_profile(user_id, profile)
+    UserStore.upsert(profile)
 
     token = _serializer.dumps({"user_id": user_id})
     response.set_cookie(
@@ -164,7 +162,7 @@ def api_logout(response: Response) -> dict:
 
 @app.get("/api/me")
 def api_me(user_id: str = Depends(current_user)) -> dict:
-    profile = _load_profile(user_id)
+    profile = UserStore.get(user_id)
     display = profile.get("name") or profile.get("email") or user_id
     ctx = UserCtx(user_id=user_id)
     return {
@@ -209,8 +207,8 @@ def api_session_end(
     body: SessionEndBody, ctx: UserCtx = Depends(_ctx)
 ) -> dict:
     client = _client()
-    path = summarize_session_to_skill(client, ctx, body.session_id)
-    return {"saved": path.name if path else None}
+    name = summarize_session_to_skill(client, ctx, body.session_id)
+    return {"saved": name}
 
 
 @app.get("/api/sessions")
@@ -245,9 +243,65 @@ def api_consolidate(
     body: ConsolidateBody = ConsolidateBody(),
     ctx: UserCtx = Depends(_ctx),
 ) -> dict:
-    """Offline consolidation pass. Writes to skills.consolidated/ side path
-    — original skills tree untouched. Idempotent."""
+    """Per-user consolidation. Folds active session-* skills into one archive
+    skill and deletes the originals. Idempotent."""
     return consolidate(ctx, dry_run=body.dry_run)
+
+
+# ---------- admin / cron ----------
+
+class AdminConsolidateBody(BaseModel):
+    user_id: str | None = None     # if None, iterate every user
+    dry_run: bool = False
+
+
+def _require_consolidate_token(x_consolidate_token: str | None = Header(default=None)) -> None:
+    if not CONSOLIDATE_TOKEN:
+        raise HTTPException(status_code=500, detail="CONSOLIDATE_TOKEN not configured")
+    if x_consolidate_token != CONSOLIDATE_TOKEN:
+        raise HTTPException(status_code=401, detail="bad token")
+
+
+@app.post("/api/admin/consolidate")
+def api_admin_consolidate(
+    body: AdminConsolidateBody = AdminConsolidateBody(),
+    _: None = Depends(_require_consolidate_token),
+) -> dict:
+    """Manual admin endpoint. Guarded by `X-Consolidate-Token` header
+    matching the `CONSOLIDATE_TOKEN` env var. Targets one user (`user_id`) or
+    iterates every row in the `users` table when omitted."""
+    return _do_consolidate(body.user_id, body.dry_run)
+
+
+@app.get("/api/cron/consolidate")
+def api_cron_consolidate(
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Vercel Cron entrypoint. Vercel auto-injects `Authorization: Bearer
+    $CRON_SECRET` on scheduled invocations — we verify against the env var.
+    Iterates every user and runs consolidation."""
+    if not CRON_SECRET:
+        raise HTTPException(status_code=500, detail="CRON_SECRET not configured")
+    if authorization != f"Bearer {CRON_SECRET}":
+        raise HTTPException(status_code=401, detail="bad cron auth")
+    return _do_consolidate(user_id=None, dry_run=False)
+
+
+def _do_consolidate(user_id: str | None, dry_run: bool) -> dict:
+    if user_id:
+        validate_user_id(user_id)
+        ctx = UserCtx(user_id=user_id)
+        return {"results": [{"user_id": user_id, **consolidate(ctx, dry_run=dry_run)}]}
+
+    out = []
+    for uid in UserStore.list_user_ids():
+        try:
+            validate_user_id(uid)
+        except ValueError:
+            continue
+        ctx = UserCtx(user_id=uid)
+        out.append({"user_id": uid, **consolidate(ctx, dry_run=dry_run)})
+    return {"results": out}
 
 
 # ---------- static ----------
