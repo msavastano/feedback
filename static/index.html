@@ -585,7 +585,8 @@ $("logout").onclick = async () => {
 
 $("consolidateBtn").onclick = async () => {
   const btn = $("consolidateBtn");
-  if (!confirm("Run consolidation? Original skills tree untouched — output written to skills.consolidated/ side path for manual review.")) return;
+  if (!confirm("Run consolidation? Folds all session-* skills into one archive skill and deletes the originals. Idempotent — safe to re-run.")) return;
+  const originalLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Consolidating…";
   try {
@@ -594,10 +595,9 @@ $("consolidateBtn").onclick = async () => {
       body: JSON.stringify({ dry_run: false }),
     });
     let msg;
-    if (res.skipped_idempotent) {
-      msg = `Already consolidated (no changes since last run).\nSide path: ${res.out_path}`;
-    } else if (res.merged_archive_skill) {
-      msg = `Merged ${res.input_sessions} session rollups → ${res.merged_archive_skill}\nReview: ${res.out_path}`;
+    if (res.merged_archive_skill) {
+      const deleted = (res.deleted_session_skills || []).length;
+      msg = `Merged ${res.input_sessions} session rollup(s) → ${res.merged_archive_skill}\nDeleted ${deleted} source skill(s).`;
     } else {
       msg = res.reason || "Nothing to consolidate.";
     }
@@ -607,6 +607,7 @@ $("consolidateBtn").onclick = async () => {
     alert(`Consolidate failed: ${e.message}`);
   } finally {
     btn.disabled = false;
+    btn.textContent = originalLabel;
   }
 };
 
