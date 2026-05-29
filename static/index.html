@@ -84,11 +84,12 @@
     background: var(--bg);
     color: var(--text);
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     transition: background 0.18s ease, color 0.18s ease;
   }
-  #app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; }
+  #app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; height: 100dvh; }
   aside {
     background: var(--surface);
     border-right: 1px solid var(--border);
@@ -167,7 +168,7 @@
     font-size: 11px;
   }
   aside button.del:hover { color: var(--danger); }
-  main { display: flex; flex-direction: column; height: 100vh; }
+  main { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
   header {
     padding: 10px 16px;
     border-bottom: 1px solid var(--border);
