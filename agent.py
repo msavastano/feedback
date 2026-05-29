@@ -205,6 +205,18 @@ def list_sessions(ctx: UserCtx) -> list[dict]:
     return SessionStore.list_sessions(ctx.user_id)
 
 
+def session_turns(ctx: UserCtx, session_id: str) -> list[dict]:
+    """Return ordered chat turns [{role, text, tokens}] for replay on refresh."""
+    rows = SessionStore.load_turns(ctx.user_id, session_id)
+    out: list[dict] = []
+    for r in rows:
+        role = r.get("role")
+        text = r.get("text", "")
+        if role in ("user", "model") and text:
+            out.append({"role": role, "text": text, "tokens": r.get("tokens")})
+    return out
+
+
 # ---------- LLM helpers ----------
 
 def _client() -> genai.Client:
