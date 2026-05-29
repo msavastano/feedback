@@ -67,6 +67,15 @@
     cursor: pointer;
     font-size: 12px;
   }
+  header select {
+    background: #2a2d36;
+    color: #e6e6e6;
+    border: 1px solid #353945;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
   #chat {
     flex: 1;
     overflow-y: auto;
@@ -238,7 +247,8 @@
   <main>
     <header>
       <div class="who" id="who"></div>
-      <div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <select id="modelSelect" title="Select model"></select>
         <button id="endSession">End session</button>
         <button id="logout">Logout</button>
       </div>
@@ -253,9 +263,12 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const DEFAULT_MODEL = "gemini-3.5-flash";
+const MODEL_STORAGE_KEY = "agent_model";
 let sessionId = null;
 let me = null;
 let turnsThisSession = 0;
+let currentModel = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
 
 async function api(path, opts = {}) {
   const r = await fetch(path, {
@@ -453,7 +466,7 @@ async function send(message) {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, message }),
+      body: JSON.stringify({ session_id: sessionId, message, model: currentModel }),
     });
     if (res.status === 401) {
       pending.remove();
@@ -538,8 +551,29 @@ async function init() {
   }
   $("login").classList.remove("show");
   $("app").style.display = "grid";
-  $("who").innerHTML = `${escapeHtml(me.display_name)} <span style="color:#6e7383;font-weight:400;font-size:11px;margin-left:8px">${escapeHtml(me.model || "")}</span>`;
+  $("who").innerHTML = `${escapeHtml(me.display_name)}`;
+  initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
   refreshSidebar();
+}
+
+function initModelSelect(allowed) {
+  const sel = $("modelSelect");
+  if (!allowed.includes(currentModel)) {
+    currentModel = DEFAULT_MODEL;
+    localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
+  }
+  sel.innerHTML = "";
+  for (const m of allowed) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    if (m === currentModel) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => {
+    currentModel = sel.value;
+    localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
+  };
 }
 
 $("composer").addEventListener("submit", (e) => {

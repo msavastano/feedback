@@ -28,6 +28,8 @@ from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel, Field
 
 from agent import (
+    ALLOWED_MODELS,
+    MODEL,
     UserCtx,
     _client,
     apply_edits,
@@ -164,13 +166,13 @@ def api_logout(response: Response) -> dict:
 def api_me(user_id: str = Depends(current_user)) -> dict:
     profile = UserStore.get(user_id)
     display = profile.get("name") or profile.get("email") or user_id
-    ctx = UserCtx(user_id=user_id)
     return {
         "user_id": user_id,
         "display_name": display,
         "email": profile.get("email", ""),
         "picture": profile.get("picture", ""),
-        "model": ctx.model,
+        "model": MODEL,
+        "allowed_models": list(ALLOWED_MODELS),
     }
 
 
@@ -179,11 +181,16 @@ def api_me(user_id: str = Depends(current_user)) -> dict:
 class ChatBody(BaseModel):
     message: str = Field(min_length=1)
     session_id: str | None = None
+    model: str | None = None
 
 
 @app.post("/api/chat")
-def api_chat(body: ChatBody, ctx: UserCtx = Depends(_ctx)) -> StreamingResponse:
+def api_chat(
+    body: ChatBody, user_id: str = Depends(current_user)
+) -> StreamingResponse:
     """NDJSON stream of stage events. First line: {session_id}. Last: {stage:'done', ...}."""
+    chosen = body.model if body.model in ALLOWED_MODELS else MODEL
+    ctx = UserCtx(user_id=user_id, model=chosen)
     client = _client()
     session_id = body.session_id or new_session(ctx)
 

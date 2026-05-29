@@ -19,7 +19,7 @@ import re
 import secrets
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from google import genai
@@ -28,6 +28,7 @@ from google.genai import types
 from store import SessionStore, SkillStore, UserStore
 
 MODEL = "gemini-3.5-flash"
+ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -69,11 +70,12 @@ def validate_user_id(user_id: str) -> str:
 class UserCtx:
     """Pure identity carrier. No filesystem state."""
     user_id: str
-    model: str = field(init=False)
+    model: str = MODEL
 
     def __post_init__(self) -> None:
         validate_user_id(self.user_id)
-        self.model = MODEL
+        if self.model not in ALLOWED_MODELS:
+            self.model = MODEL
 
 
 def get_secret_key() -> bytes:
