@@ -544,6 +544,7 @@
 const $ = (id) => document.getElementById(id);
 const DEFAULT_MODEL = "gemini-3.5-flash";
 const MODEL_STORAGE_KEY = "agent_model";
+const SESSION_STORAGE_KEY = "agent_session";
 let sessionId = null;
 let me = null;
 let turnsThisSession = 0;
@@ -672,6 +673,7 @@ async function refreshSidebar() {
     const li = document.createElement("li");
     if (s.session_id === sessionId) li.classList.add("active");
     li.innerHTML = `<div>${escapeHtml(s.first_message || "(empty)")}</div><div class="meta">${s.turns} turns · ${s.last_ts.slice(0, 16)}</div>`;
+    li.onclick = () => loadSession(s.session_id);
     sList.appendChild(li);
   }
   const skList = $("skills");
@@ -891,6 +893,7 @@ async function send(message) {
 function handleStreamEvent(ev, pending, setFinal) {
   if (ev.stage === "init" && ev.session_id) {
     sessionId = ev.session_id;
+    try { localStorage.setItem(SESSION_STORAGE_KEY, sessionId); } catch (e) {}
     return;
   }
   if (ev.stage === "error") {
@@ -902,6 +905,31 @@ function handleStreamEvent(ev, pending, setFinal) {
     return;
   }
   if (ev.msg) pending.update(ev.msg);
+}
+
+async function loadSession(sid) {
+  if (!sid) return;
+  let data;
+  try {
+    data = await api(`/api/session/${encodeURIComponent(sid)}`);
+  } catch (e) {
+    try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+    return;
+  }
+  const turns = data.turns || [];
+  if (!turns.length) {
+    try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+    return;
+  }
+  sessionId = sid;
+  turnsThisSession = turns.filter((t) => t.role === "user").length;
+  try { localStorage.setItem(SESSION_STORAGE_KEY, sid); } catch (e) {}
+  $("chat").innerHTML = "";
+  for (const t of turns) {
+    appendMessage(t.role === "model" ? "agent" : "user", t.text);
+  }
+  closeSidebar();
+  refreshSidebar();
 }
 
 async function init() {
@@ -922,7 +950,10 @@ async function init() {
   $("app").style.display = "grid";
   $("who").innerHTML = `${escapeHtml(me.display_name)}`;
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
-  refreshSidebar();
+  await refreshSidebar();
+  let stored = null;
+  try { stored = localStorage.getItem(SESSION_STORAGE_KEY); } catch (e) {}
+  if (stored) await loadSession(stored);
 }
 
 function initModelSelect(allowed) {
@@ -986,6 +1017,7 @@ $("newSession").onclick = () => {
   flushSessionBeacon();
   sessionId = null;
   turnsThisSession = 0;
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
   closeSidebar();
 };
@@ -999,12 +1031,14 @@ $("endSession").onclick = async () => {
   if (res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);
   sessionId = null;
   turnsThisSession = 0;
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
   refreshSidebar();
 };
 
 $("logout").onclick = async () => {
   flushSessionBeacon();
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   await fetch("/api/logout", { method: "POST" });
   location.reload();
 };
@@ -1037,6 +1071,8 @@ $("consolidateBtn").onclick = async () => {
   }
 };
 
+// Explicit summarize-on-leave (new chat / logout). NOT bound to page
+// unload — a refresh must preserve the live session, not end it.
 function flushSessionBeacon() {
   if (!sessionId || turnsThisSession < 1) return;
   try {
@@ -1049,9 +1085,6 @@ function flushSessionBeacon() {
     // best-effort
   }
 }
-
-window.addEventListener("pagehide", flushSessionBeacon);
-window.addEventListener("beforeunload", flushSessionBeacon);
 
 init();
 </script>

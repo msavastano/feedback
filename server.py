@@ -41,6 +41,7 @@ from agent import (
     new_session,
     run_turn,
     run_turn_events,
+    session_turns,
     summarize_session_to_skill,
     validate_user_id,
 )
@@ -221,6 +222,11 @@ def api_session_end(
 @app.get("/api/sessions")
 def api_sessions(ctx: UserCtx = Depends(_ctx)) -> list[dict]:
     return list_sessions(ctx)
+
+
+@app.get("/api/session/{session_id}")
+def api_session_get(session_id: str, ctx: UserCtx = Depends(_ctx)) -> dict:
+    return {"session_id": session_id, "turns": session_turns(ctx, session_id)}
 
 
 # ---------- skills ----------
