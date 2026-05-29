@@ -32,13 +32,17 @@
     min-height: 0;
     flex: 0 0 auto;
   }
-  aside .section[open] {
+  aside .section.open {
     flex: 1 1 0;
   }
   aside .section + .section { margin-top: 4px; }
-  aside summary {
-    list-style: none;
+  aside .section-toggle {
+    background: none;
+    border: none;
+    width: 100%;
+    text-align: left;
     cursor: pointer;
+    font: inherit;
     font-size: 11px;
     text-transform: uppercase;
     color: #8a8f9c;
@@ -48,25 +52,26 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex: 0 0 auto;
   }
-  aside summary::-webkit-details-marker { display: none; }
-  aside summary::before {
+  aside .section-toggle::before {
     content: '▸';
     font-size: 9px;
     color: #6e7383;
     transition: transform 0.15s;
     display: inline-block;
   }
-  aside .section[open] > summary::before {
+  aside .section.open > .section-toggle::before {
     transform: rotate(90deg);
   }
-  aside summary:hover { color: #c0c4d0; }
+  aside .section-toggle:hover { color: #c0c4d0; }
   aside .section-content {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     padding-right: 2px;
   }
+  aside .section:not(.open) > .section-content { display: none; }
   aside ul { list-style: none; padding: 0; margin: 0; }
   aside li {
     padding: 6px 8px;
@@ -275,20 +280,20 @@
 <div id="app" style="display:none">
   <aside>
     <button id="newSession" style="width:100%;background:#4c6ef5;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;flex:0 0 auto">+ New chat</button>
-    <details class="section" id="sessionsSection" open>
-      <summary>Sessions</summary>
+    <div class="section open" id="sessionsSection">
+      <button type="button" class="section-toggle" data-section="sessionsSection">Sessions</button>
       <div class="section-content">
         <ul id="sessions"></ul>
       </div>
-    </details>
-    <details class="section" id="skillsSection" open>
-      <summary>Skills</summary>
+    </div>
+    <div class="section open" id="skillsSection">
+      <button type="button" class="section-toggle" data-section="skillsSection">Skills</button>
       <div class="section-content">
         <div class="stats" id="skillStats" style="display:none"></div>
         <button class="consolidate" id="consolidateBtn" style="display:none">Consolidate sessions…</button>
         <ul id="skills"></ul>
       </div>
-    </details>
+    </div>
   </aside>
   <main>
     <header>
@@ -620,6 +625,12 @@ function initModelSelect(allowed) {
     currentModel = sel.value;
     localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
   };
+}
+
+for (const btn of document.querySelectorAll(".section-toggle")) {
+  btn.addEventListener("click", () => {
+    $(btn.dataset.section).classList.toggle("open");
+  });
 }
 
 $("composer").addEventListener("submit", (e) => {
