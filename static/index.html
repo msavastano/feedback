@@ -99,6 +99,8 @@
     overflow: hidden;
     min-height: 0;
   }
+  #menuToggle { display: none; }
+  #sidebarBackdrop { display: none; }
   aside .section {
     display: flex;
     flex-direction: column;
@@ -421,6 +423,47 @@
   }
   #login .user:hover { background: var(--surface-2); }
   .empty { color: var(--text-mute); font-style: italic; padding: 4px 8px; }
+
+  /* ---- responsive: small screens ---- */
+  @media (max-width: 768px) {
+    #app { grid-template-columns: 1fr; }
+    aside {
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 260px;
+      max-width: 82vw;
+      z-index: 25;
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+      box-shadow: var(--shadow);
+    }
+    aside.open { transform: translateX(0); }
+    #sidebarBackdrop {
+      position: fixed;
+      inset: 0;
+      background: var(--overlay);
+      z-index: 24;
+    }
+    #sidebarBackdrop.show { display: block; }
+    #menuToggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 5px 10px;
+      line-height: 1;
+      font-size: 16px;
+    }
+    header { padding: 8px 10px; gap: 6px; flex-wrap: wrap; }
+    header .who { font-size: 14px; }
+    header select, header button { padding: 5px 10px; font-size: 12px; }
+    #chat { padding: 12px; }
+    .msg { max-width: 100%; }
+    .pending { max-width: 100%; }
+    form#composer { padding: 8px 10px; }
+    #skillPop { width: auto; left: 8px !important; right: 8px; max-width: none; }
+  }
 </style>
 <script>
   // Apply theme before first paint to avoid a flash.
@@ -458,6 +501,7 @@
 </div>
 
 <div id="app" style="display:none">
+  <div id="sidebarBackdrop"></div>
   <aside>
     <button id="newSession" style="width:100%;background:var(--accent);color:var(--accent-fg);border:none;padding:9px;border-radius:var(--r-pill);cursor:pointer;flex:0 0 auto;font-weight:600">+ New chat</button>
     <div class="section open" id="sessionsSection">
@@ -477,7 +521,10 @@
   </aside>
   <main>
     <header>
-      <div class="who" id="who"></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button id="menuToggle" type="button" title="Menu" aria-label="Toggle sidebar">☰</button>
+        <div class="who" id="who"></div>
+      </div>
       <div style="display:flex;align-items:center;gap:8px">
         <select id="modelSelect" title="Select model"></select>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
@@ -778,6 +825,7 @@ function createPending() {
 }
 
 async function send(message) {
+  closeSidebar();
   appendMessage("user", message);
   $("send").disabled = true;
   const pending = createPending();
@@ -897,6 +945,20 @@ function initModelSelect(allowed) {
   };
 }
 
+// ---------- mobile sidebar drawer ----------
+function openSidebar() {
+  document.querySelector("aside").classList.add("open");
+  $("sidebarBackdrop").classList.add("show");
+}
+function closeSidebar() {
+  document.querySelector("aside").classList.remove("open");
+  $("sidebarBackdrop").classList.remove("show");
+}
+$("menuToggle").onclick = () => {
+  document.querySelector("aside").classList.contains("open") ? closeSidebar() : openSidebar();
+};
+$("sidebarBackdrop").onclick = closeSidebar;
+
 for (const btn of document.querySelectorAll(".section-toggle")) {
   btn.addEventListener("click", () => {
     $(btn.dataset.section).classList.toggle("open");
@@ -925,6 +987,7 @@ $("newSession").onclick = () => {
   sessionId = null;
   turnsThisSession = 0;
   $("chat").innerHTML = "";
+  closeSidebar();
 };
 
 $("endSession").onclick = async () => {
