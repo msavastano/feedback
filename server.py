@@ -233,6 +233,19 @@ def api_skills(ctx: UserCtx = Depends(_ctx)) -> list[dict]:
     ]
 
 
+@app.get("/api/skill/{name}")
+def api_skill_get(name: str, ctx: UserCtx = Depends(_ctx)) -> dict:
+    for s in load_skills(ctx):
+        if s.name == name:
+            return {
+                "name": s.name,
+                "tier": s.tier,
+                "description": s.description,
+                "body": s.body,
+            }
+    raise HTTPException(status_code=404, detail="skill not found")
+
+
 @app.delete("/api/skill/{name}")
 def api_skill_delete(name: str, ctx: UserCtx = Depends(_ctx)) -> dict:
     ok = delete_skill(ctx, name)
