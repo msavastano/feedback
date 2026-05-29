@@ -234,6 +234,66 @@
     font-weight: 600;
   }
   #composer button:disabled { opacity: 0.5; }
+  /* skill hover preview */
+  #skillPop {
+    position: fixed;
+    display: none;
+    z-index: 20;
+    width: 340px;
+    max-height: 60vh;
+    overflow: auto;
+    background: #14161c;
+    border: 1px solid #2a2d36;
+    border-radius: 6px;
+    padding: 12px 14px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  }
+  #skillPop.show { display: block; }
+  #skillPop .pop-name { font-size: 13px; font-weight: 600; color: #c0c4d0; }
+  #skillPop .pop-tier { font-size: 10px; color: #6e7383; margin-left: 6px; }
+  #skillPop .pop-desc { font-size: 11px; color: #8a8f9c; margin: 4px 0 8px; }
+  #skillPop .pop-body {
+    font-size: 11px;
+    color: #b0b4c0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* confirm modal */
+  #confirm {
+    position: fixed;
+    inset: 0;
+    background: rgba(8,9,12,0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 30;
+  }
+  #confirm.show { display: flex; }
+  #confirm .card {
+    background: #14161c;
+    border: 1px solid #2a2d36;
+    padding: 20px;
+    border-radius: 8px;
+    min-width: 300px;
+    max-width: 420px;
+  }
+  #confirm .msg { font-size: 13px; color: #c0c4d0; margin-bottom: 16px; }
+  #confirm .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  #confirm button {
+    border: none;
+    padding: 8px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  #confirm .cancel { background: #2a2d36; color: #c0c4d0; }
+  #confirm .cancel:hover { background: #353945; }
+  #confirm .ok { background: #c23b3b; color: #fff; }
+  #confirm .ok:hover { background: #d44848; }
+
   /* login overlay */
   #login {
     position: fixed;
@@ -276,6 +336,17 @@
   </div>
 </div>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+<div id="skillPop"></div>
+<div id="confirm">
+  <div class="card">
+    <div class="msg" id="confirmMsg"></div>
+    <div class="actions">
+      <button type="button" class="cancel" id="confirmCancel">Cancel</button>
+      <button type="button" class="ok" id="confirmOk">Delete</button>
+    </div>
+  </div>
+</div>
 
 <div id="app" style="display:none">
   <aside>
@@ -442,10 +513,13 @@ async function refreshSidebar() {
     li.querySelector(".del").onclick = async (e) => {
       e.stopPropagation();
       const name = e.target.dataset.name;
-      if (!confirm(`Delete skill "${name}"?`)) return;
+      hideSkillPop();
+      if (!(await confirmModal(`Delete skill "${name}"? This cannot be undone.`))) return;
       await api(`/api/skill/${encodeURIComponent(name)}`, { method: "DELETE" });
       refreshSidebar();
     };
+    li.addEventListener("mouseenter", () => showSkillPop(li, s));
+    li.addEventListener("mouseleave", scheduleHideSkillPop);
     skList.appendChild(li);
   }
 
@@ -480,6 +554,78 @@ function escapeHtml(s) {
   return (s || "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
+}
+
+// ---------- skill hover preview ----------
+const skillBodyCache = {};
+let skillPopToken = 0;
+let skillPopHideTimer = null;
+
+function initSkillPop() {
+  const pop = $("skillPop");
+  pop.addEventListener("mouseenter", () => clearTimeout(skillPopHideTimer));
+  pop.addEventListener("mouseleave", scheduleHideSkillPop);
+}
+
+function scheduleHideSkillPop() {
+  clearTimeout(skillPopHideTimer);
+  skillPopHideTimer = setTimeout(hideSkillPop, 150);
+}
+
+async function showSkillPop(li, s) {
+  clearTimeout(skillPopHideTimer);
+  const pop = $("skillPop");
+  const token = ++skillPopToken;
+  const tier = `<span class="pop-tier">[${escapeHtml(s.tier)}]</span>`;
+  const head =
+    `<div class="pop-name">${escapeHtml(s.name)}${tier}</div>` +
+    `<div class="pop-desc">${escapeHtml(s.description)}</div>`;
+  let body = skillBodyCache[s.name];
+  pop.innerHTML = head + `<pre class="pop-body">${escapeHtml(body ?? "loading…")}</pre>`;
+  positionSkillPop(li, pop);
+  pop.classList.add("show");
+  if (body === undefined) {
+    try {
+      const full = await api(`/api/skill/${encodeURIComponent(s.name)}`);
+      body = skillBodyCache[s.name] = full.body || "(empty)";
+    } catch {
+      body = "(failed to load)";
+    }
+    if (token !== skillPopToken) return; // moved to another row
+    pop.innerHTML = head + `<pre class="pop-body">${escapeHtml(body)}</pre>`;
+    positionSkillPop(li, pop);
+  }
+}
+
+function positionSkillPop(li, pop) {
+  const r = li.getBoundingClientRect();
+  pop.style.left = `${r.right + 8}px`;
+  const top = Math.min(r.top, window.innerHeight - pop.offsetHeight - 8);
+  pop.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideSkillPop() {
+  skillPopToken++;
+  $("skillPop").classList.remove("show");
+}
+
+// ---------- confirm modal ----------
+function confirmModal(message) {
+  return new Promise((resolve) => {
+    const box = $("confirm");
+    $("confirmMsg").textContent = message;
+    const done = (val) => {
+      box.classList.remove("show");
+      $("confirmOk").onclick = null;
+      $("confirmCancel").onclick = null;
+      box.onclick = null;
+      resolve(val);
+    };
+    $("confirmOk").onclick = () => done(true);
+    $("confirmCancel").onclick = () => done(false);
+    box.onclick = (e) => { if (e.target === box) done(false); };
+    box.classList.add("show");
+  });
 }
 
 function createPending() {
@@ -632,6 +778,8 @@ for (const btn of document.querySelectorAll(".section-toggle")) {
     $(btn.dataset.section).classList.toggle("open");
   });
 }
+
+initSkillPop();
 
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
