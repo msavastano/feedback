@@ -30,11 +30,14 @@ from store import SessionStore, SkillStore, UserStore
 MODEL = "gemini-3.5-flash"
 ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
 
-# Models that reliably drive the built-in code_execution tool. flash-lite
-# mis-emits a bare function_call instead of running code (which AFC can't
-# resolve, leaving an empty response), so it is excluded — the tool is only
-# attached for models in this set.
-CODE_EXEC_MODELS = ("gemini-3.5-flash",)
+# Per-model thinking level for the main respond() call. Gemini 3 tool use
+# (code execution / search) needs thinking engaged; without a thinking_config
+# flash-lite mis-emits a bare function_call instead of running code. Mirror the
+# levels AI Studio's generated code pairs with each model.
+THINKING_LEVELS = {
+    "gemini-3.5-flash": types.ThinkingLevel.MEDIUM,
+    "gemini-3.1-flash-lite": types.ThinkingLevel.MINIMAL,
+}
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -364,9 +367,9 @@ def _assemble_answer(resp) -> str:
         return assembled
     if saw_function_call:
         return (
-            "(The model returned an unhandled tool call and no text. This "
-            "usually means the selected model does not support the requested "
-            "tool - try gemini-3.5-flash for code execution.)"
+            "(The model returned an unhandled tool call and no text - the tool "
+            "invocation did not resolve to a result this turn. Try rephrasing, "
+            "or raise the model's thinking level.)"
         )
     return resp.text or ""
 
@@ -404,15 +407,14 @@ def respond(
         "Use google_search when current information is needed.\n\n"
         f"LOADED SKILLS:\n{loaded_text or '(none)'}"
     )
-    use_code_exec = allow_code_execution and model in CODE_EXEC_MODELS
-    if use_code_exec:
+    if allow_code_execution:
         sys_prompt += (
             "\n\nYou may run Python via the code execution tool for "
             "calculation, data manipulation, or anything better solved by "
             "executing code than by reasoning in prose."
         )
     tools = [types.Tool(google_search=types.GoogleSearch())]
-    if use_code_exec:
+    if allow_code_execution:
         tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
     contents = history + [
         types.Content(role="user", parts=[types.Part(text=prompt)])
@@ -423,6 +425,11 @@ def respond(
         config=types.GenerateContentConfig(
             system_instruction=sys_prompt,
             tools=tools,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=THINKING_LEVELS.get(
+                    model, types.ThinkingLevel.MEDIUM
+                )
+            ),
         ),
     )
     usage = _log_usage("respond", resp)
