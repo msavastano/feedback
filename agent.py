@@ -324,6 +324,32 @@ def pick_archive_sections(
         return ""
 
 
+def _assemble_answer(resp) -> str:
+    """Build a readable markdown answer from a (possibly multi-part) response.
+
+    With the code_execution tool, a response interleaves text, executable_code,
+    and code_execution_result parts. `resp.text` drops the latter two (and
+    warns), so we walk parts in order and fence code + output. Falls back to
+    `resp.text` when there are no structured parts."""
+    cand = (getattr(resp, "candidates", None) or [None])[0]
+    content = getattr(cand, "content", None) if cand else None
+    parts = getattr(content, "parts", None) if content else None
+    if not parts:
+        return resp.text or ""
+    out: list[str] = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        if text:
+            out.append(text)
+        code = getattr(part, "executable_code", None)
+        if code is not None and getattr(code, "code", None):
+            out.append(f"```python\n{code.code}\n```")
+        result = getattr(part, "code_execution_result", None)
+        if result is not None and getattr(result, "output", None):
+            out.append(f"```\n{result.output}\n```")
+    return "\n\n".join(out).strip() or (resp.text or "")
+
+
 def respond(
     client: genai.Client,
     prompt: str,
@@ -332,8 +358,10 @@ def respond(
     archive_excerpts: list[tuple[Skill, str]],
     history: list[types.Content],
     model: str = MODEL,
+    allow_code_execution: bool = False,
 ) -> tuple[str, dict]:
-    """Main answer. Has google_search grounding. Returns (text, usage)."""
+    """Main answer. Has google_search grounding (and optional code execution).
+    Returns (text, usage)."""
     sys_block = "\n\n".join(
         f"## [system] {s.name}\n{s.body.strip()}" for s in system_skills
     )
@@ -355,6 +383,15 @@ def respond(
         "Use google_search when current information is needed.\n\n"
         f"LOADED SKILLS:\n{loaded_text or '(none)'}"
     )
+    if allow_code_execution:
+        sys_prompt += (
+            "\n\nYou may run Python via the code execution tool for "
+            "calculation, data manipulation, or anything better solved by "
+            "executing code than by reasoning in prose."
+        )
+    tools = [types.Tool(google_search=types.GoogleSearch())]
+    if allow_code_execution:
+        tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
     contents = history + [
         types.Content(role="user", parts=[types.Part(text=prompt)])
     ]
@@ -363,11 +400,11 @@ def respond(
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=sys_prompt,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
+            tools=tools,
         ),
     )
     usage = _log_usage("respond", resp)
-    return resp.text or "", usage
+    return _assemble_answer(resp), usage
 
 
 EDIT_INSTRUCTIONS = """\
@@ -648,8 +685,13 @@ def run_turn_events(
     ctx: UserCtx,
     session_id: str,
     prompt: str,
+    allow_code_execution: bool = False,
 ):
-    """Generator. Yields {stage, msg, ...} dicts. Final event has stage='done'."""
+    """Generator. Yields {stage, msg, ...} dicts. Final event has stage='done'.
+
+    `allow_code_execution` enables Gemini's code execution tool in `respond`.
+    CLI passes True; the server leaves it False to keep the web path text-only.
+    """
     yield {"stage": "load", "msg": "Reading skill catalog…"}
     skills = load_skills(ctx)
     system_skills = [s for s in skills if s.tier == "system"]
@@ -693,6 +735,7 @@ def run_turn_events(
         archive_excerpts,
         history,
         model=ctx.model,
+        allow_code_execution=allow_code_execution,
     )
 
     yield {"stage": "persist", "msg": "Saving turn to session log…"}
@@ -741,10 +784,14 @@ def run_turn(
     ctx: UserCtx,
     session_id: str,
     prompt: str,
+    allow_code_execution: bool = False,
 ) -> TurnResult:
     """Drains run_turn_events. Kept for CLI compatibility."""
     final: dict | None = None
-    for ev in run_turn_events(client, ctx, session_id, prompt):
+    for ev in run_turn_events(
+        client, ctx, session_id, prompt,
+        allow_code_execution=allow_code_execution,
+    ):
         if ev.get("stage") == "done":
             final = ev
     if final is None:
@@ -760,6 +807,13 @@ def run_turn(
 
 
 # ---------- REPL ----------
+
+def _code_exec_enabled() -> bool:
+    """CLI code execution toggle. On by default; set AGENT_CODE_EXEC=0 to disable."""
+    return os.environ.get("AGENT_CODE_EXEC", "1").strip().lower() not in (
+        "0", "false", "no", "off", ""
+    )
+
 
 def main() -> None:
     if "--consolidate" in sys.argv:
@@ -782,7 +836,9 @@ def main() -> None:
     ctx = UserCtx(user_id=user_id)
     client = _client()
     session_id = new_session(ctx)
+    code_exec = _code_exec_enabled()
     print(f"Agent ready ({ctx.model}). User: {user_id}. Session: {session_id}")
+    print(f"Code execution: {'on' if code_exec else 'off'} (AGENT_CODE_EXEC)")
     print("Type prompt. Ctrl-C to exit.\n")
 
     while True:
@@ -794,7 +850,10 @@ def main() -> None:
         if not prompt:
             continue
 
-        result = run_turn(client, ctx, session_id, prompt)
+        result = run_turn(
+            client, ctx, session_id, prompt,
+            allow_code_execution=code_exec,
+        )
 
         tier_summary = []
         if result.loaded_system:

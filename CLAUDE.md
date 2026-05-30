@@ -28,6 +28,9 @@ $env:AGENT_DEBUG = "1"
 
 # history window cap (default 20 turns sent to respond)
 $env:AGENT_HISTORY_CAP = "40"
+
+# CLI code execution (Gemini built-in sandbox; on by default, CLI only — never web)
+$env:AGENT_CODE_EXEC = "0"   # disable
 ```
 
 No test suite, no linter config. Manual testing via CLI or `/api/chat`.
