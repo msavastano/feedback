@@ -432,6 +432,20 @@ def respond(
             ),
         ),
     )
+    if os.environ.get("AGENT_DEBUG"):
+        cand = (getattr(resp, "candidates", None) or [None])[0]
+        parts = getattr(getattr(cand, "content", None), "parts", None) or []
+        kinds = [
+            attr
+            for p in parts
+            for attr in (
+                "text", "executable_code", "code_execution_result",
+                "function_call",
+            )
+            if getattr(p, attr, None)
+        ]
+        ran_code = "executable_code" in kinds
+        print(f"[respond parts] {kinds} code_executed={ran_code}")
     usage = _log_usage("respond", resp)
     return _assemble_answer(resp), usage
 
