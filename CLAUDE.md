@@ -13,6 +13,8 @@ $env:GOOGLE_CLIENT_ID = "..." # OAuth 2.0 Web client ID from Google Cloud Consol
 
 # web server (Google OAuth login, bind to loopback only)
 uvicorn server:app --host 127.0.0.1 --port 8000
+$env:CODE_EXEC_USERS = "alice,bob"  # opt-in: user_ids allowed code execution on
+                                    # the web path (off for everyone when unset)
 
 # CLI (single user per process, no Google flow — AGENT_USER_ID is the identity)
 $env:AGENT_USER_ID = "alice"
@@ -28,6 +30,11 @@ $env:AGENT_DEBUG = "1"
 
 # history window cap (default 20 turns sent to respond)
 $env:AGENT_HISTORY_CAP = "40"
+
+# CLI code execution (Gemini built-in sandbox; on by default, CLI only — never web)
+# respond() sets a per-model thinking_level (see THINKING_LEVELS in agent.py);
+# tool use needs thinking engaged or the model mis-emits a bare function_call.
+$env:AGENT_CODE_EXEC = "0"   # disable
 ```
 
 No test suite, no linter config. Manual testing via CLI or `/api/chat`.
