@@ -13,6 +13,8 @@ $env:GOOGLE_CLIENT_ID = "..." # OAuth 2.0 Web client ID from Google Cloud Consol
 
 # web server (Google OAuth login, bind to loopback only)
 uvicorn server:app --host 127.0.0.1 --port 8000
+$env:CODE_EXEC_USERS = "alice,bob"  # opt-in: user_ids allowed code execution on
+                                    # the web path (off for everyone when unset)
 
 # CLI (single user per process, no Google flow — AGENT_USER_ID is the identity)
 $env:AGENT_USER_ID = "alice"

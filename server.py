@@ -55,6 +55,16 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 CONSOLIDATE_TOKEN = os.environ.get("CONSOLIDATE_TOKEN", "").strip()
 CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()  # Vercel Cron auto-injects
 
+# Comma-separated user_ids allowed to use Gemini code execution on the web path.
+# Code runs in Google's sandbox (no host access), but it is billable and abusable,
+# so it is an opt-in entitlement gated on the authenticated identity. Off for
+# everyone when unset.
+CODE_EXEC_USERS = {
+    u for u in (
+        s.strip() for s in os.environ.get("CODE_EXEC_USERS", "").split(",")
+    ) if u
+}
+
 app = FastAPI(title="Skill-memory agent")
 
 _serializer = URLSafeSerializer(get_secret_key(), salt="agent-user-cookie")
@@ -195,10 +205,15 @@ def api_chat(
     client = _client()
     session_id = body.session_id or new_session(ctx)
 
+    allow_code_execution = user_id in CODE_EXEC_USERS
+
     def gen():
         yield json.dumps({"stage": "init", "session_id": session_id}) + "\n"
         try:
-            for ev in run_turn_events(client, ctx, session_id, body.message):
+            for ev in run_turn_events(
+                client, ctx, session_id, body.message,
+                allow_code_execution=allow_code_execution,
+            ):
                 yield json.dumps(ev) + "\n"
         except Exception as e:
             yield json.dumps({"stage": "error", "msg": str(e)}) + "\n"
