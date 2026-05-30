@@ -32,6 +32,8 @@ $env:AGENT_DEBUG = "1"
 $env:AGENT_HISTORY_CAP = "40"
 
 # CLI code execution (Gemini built-in sandbox; on by default, CLI only — never web)
+# Requires a code-exec-capable model (gemini-3.5-flash). flash-lite mis-emits a
+# bare function_call and runs no code, so the tool is not attached for it.
 $env:AGENT_CODE_EXEC = "0"   # disable
 ```
 

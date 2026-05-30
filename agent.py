@@ -30,6 +30,12 @@ from store import SessionStore, SkillStore, UserStore
 MODEL = "gemini-3.5-flash"
 ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
 
+# Models that reliably drive the built-in code_execution tool. flash-lite
+# mis-emits a bare function_call instead of running code (which AFC can't
+# resolve, leaving an empty response), so it is excluded — the tool is only
+# attached for models in this set.
+CODE_EXEC_MODELS = ("gemini-3.5-flash",)
+
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
@@ -337,6 +343,7 @@ def _assemble_answer(resp) -> str:
     if not parts:
         return resp.text or ""
     out: list[str] = []
+    saw_function_call = False
     for part in parts:
         text = getattr(part, "text", None)
         if text:
@@ -347,7 +354,21 @@ def _assemble_answer(resp) -> str:
         result = getattr(part, "code_execution_result", None)
         if result is not None and getattr(result, "output", None):
             out.append(f"```\n{result.output}\n```")
-    return "\n\n".join(out).strip() or (resp.text or "")
+        # A bare function_call (no matching callable) would otherwise leave the
+        # answer empty. Surface it instead of silently dropping the turn.
+        fc = getattr(part, "function_call", None)
+        if fc is not None and getattr(fc, "name", None):
+            saw_function_call = True
+    assembled = "\n\n".join(out).strip()
+    if assembled:
+        return assembled
+    if saw_function_call:
+        return (
+            "(The model returned an unhandled tool call and no text. This "
+            "usually means the selected model does not support the requested "
+            "tool - try gemini-3.5-flash for code execution.)"
+        )
+    return resp.text or ""
 
 
 def respond(
@@ -383,14 +404,15 @@ def respond(
         "Use google_search when current information is needed.\n\n"
         f"LOADED SKILLS:\n{loaded_text or '(none)'}"
     )
-    if allow_code_execution:
+    use_code_exec = allow_code_execution and model in CODE_EXEC_MODELS
+    if use_code_exec:
         sys_prompt += (
             "\n\nYou may run Python via the code execution tool for "
             "calculation, data manipulation, or anything better solved by "
             "executing code than by reasoning in prose."
         )
     tools = [types.Tool(google_search=types.GoogleSearch())]
-    if allow_code_execution:
+    if use_code_exec:
         tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
     contents = history + [
         types.Content(role="user", parts=[types.Part(text=prompt)])
