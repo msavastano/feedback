@@ -36,7 +36,7 @@ ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
 # levels AI Studio's generated code pairs with each model.
 THINKING_LEVELS = {
     "gemini-3.5-flash": types.ThinkingLevel.MEDIUM,
-    "gemini-3.1-flash-lite": types.ThinkingLevel.MINIMAL,
+    "gemini-3.1-flash-lite": types.ThinkingLevel.MEDIUM,
 }
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
