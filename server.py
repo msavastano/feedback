@@ -357,3 +357,9 @@ def index() -> FileResponse:
     if not idx.exists():
         return JSONResponse({"error": "static/index.html missing"}, status_code=500)
     return FileResponse(idx)
+
+
+@app.get("/favicon.ico")
+def favicon() -> FileResponse:
+    """Browsers probe /favicon.ico at the root; serve the SVG icon."""
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
