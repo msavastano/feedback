@@ -476,46 +476,77 @@
   #login .user:hover { background: var(--surface-2); }
   .empty { color: var(--text-mute); font-style: italic; padding: 4px 8px; }
 
-  /* ---- responsive: small screens ---- */
-  @media (max-width: 768px) {
-    #app { grid-template-columns: 1fr; }
-    aside {
-      position: fixed;
-      top: 0;
-      left: 0;
-      bottom: 0;
-      width: 260px;
-      max-width: 82vw;
-      z-index: 25;
-      transform: translateX(-100%);
-      transition: transform 0.2s ease;
-      box-shadow: var(--shadow);
-    }
-    aside.open { transform: translateX(0); }
-    #sidebarBackdrop {
-      position: fixed;
-      inset: 0;
-      background: var(--overlay);
-      z-index: 24;
-    }
-    #sidebarBackdrop.show { display: block; }
-    #menuToggle {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 5px 10px;
-      line-height: 1;
-      font-size: 16px;
-    }
-    header { padding: 8px 10px; gap: 6px; flex-wrap: wrap; }
-    header .who { font-size: 14px; }
-    header select, header button { padding: 5px 10px; font-size: 12px; }
-    #chat { padding: 12px; }
-    .msg { max-width: 100%; }
-    .pending { max-width: 100%; }
-    form#composer { padding: 8px 10px; }
-    #skillPop { width: auto; left: 8px !important; right: 8px; max-width: none; }
+  #apiKey {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 24px;
+    overflow-y: auto;
   }
+  #apiKey.show { display: flex; }
+  #apiKey .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 28px;
+    border-radius: var(--r-card);
+    max-width: 520px;
+    width: 100%;
+    box-shadow: var(--shadow);
+  }
+  #apiKey h1 { margin: 0 0 6px; font-size: 18px; font-family: var(--font-display); }
+  #apiKey .sub { color: var(--text-mute); font-size: 12px; margin: 0 0 18px; }
+  #apiKey .explain {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 14px 16px;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.55;
+    margin-bottom: 18px;
+  }
+  #apiKey .explain strong { color: var(--text); }
+  #apiKey .explain ol { margin: 8px 0 0; padding-left: 20px; }
+  #apiKey .explain li { margin-bottom: 5px; }
+  #apiKey .explain a { color: var(--accent); }
+  #apiKey .notice {
+    font-size: 12px;
+    color: var(--text-2);
+    background: var(--surface-3, var(--surface-2));
+    border-left: 3px solid var(--accent);
+    padding: 10px 12px;
+    border-radius: var(--r-sm);
+    margin-bottom: 18px;
+    line-height: 1.5;
+  }
+  #apiKey input {
+    width: 100%;
+    padding: 11px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono, monospace);
+    font-size: 13px;
+    margin-bottom: 12px;
+    box-sizing: border-box;
+  }
+  #apiKey .row { display: flex; gap: 8px; align-items: center; }
+  #apiKey button {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border: none;
+    padding: 10px 18px;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    font-weight: 600;
+  }
+  #apiKey button:hover { filter: brightness(1.08); }
+  #apiKey .err { color: var(--danger); font-size: 12px; margin-top: 12px; display: none; }
 </style>
 <script>
   // Apply theme before first paint to avoid a flash.
@@ -542,6 +573,32 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+
+<div id="apiKey">
+  <div class="card">
+    <h1>Add your Gemini API key</h1>
+    <p class="sub">This app uses Google's Gemini models. You bring your own key so usage is billed to your own Google account.</p>
+
+    <div class="explain">
+      <strong>What is this?</strong> A Gemini API key is a secret token that lets this app make AI requests as you. It's free to create at Google AI Studio, and Gemini has a no-cost tier for light use.
+      <ol>
+        <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">aistudio.google.com/apikey</a> and sign in with your Google account.</li>
+        <li>Click <strong>Create API key</strong> (pick a Google Cloud project, or let it make one).</li>
+        <li>Copy the key — it looks like <code>AIza…</code> — and paste it below.</li>
+      </ol>
+    </div>
+
+    <div class="notice">
+      🔒 Your key is kept <strong>only in this browser tab</strong> (session storage). It's sent with each request to power the AI and is <strong>never saved on our server</strong>. Closing the tab or logging out erases it — you'll re-enter it next time. Treat it like a password and don't share it.
+    </div>
+
+    <input id="apiKeyInput" type="password" placeholder="Paste your Gemini API key (AIza…)" autocomplete="off" spellcheck="false" />
+    <div class="row">
+      <button type="button" id="apiKeySave">Save key &amp; continue</button>
+    </div>
+    <p id="apiKeyError" class="err"></p>
+  </div>
+</div>
 
 <div id="skillPop"></div>
 <div id="confirm">
@@ -598,7 +655,19 @@
 const $ = (id) => document.getElementById(id);
 const DEFAULT_MODEL = "gemini-3.5-flash";
 const MODEL_STORAGE_KEY = "agent_model";
-const SESSION_STORAGE_KEY = "agent_session";
+// Gemini key lives only in sessionStorage: it survives reloads within the tab
+// but is erased when the tab/browser closes — matching "lasts as long as the
+// browser session." Never persisted to localStorage or the server.
+const GEMINI_KEY_STORAGE = "agent_gemini_key";
+function getGeminiKey() {
+  try { return sessionStorage.getItem(GEMINI_KEY_STORAGE) || ""; } catch (e) { return ""; }
+}
+function setGeminiKey(k) {
+  try { sessionStorage.setItem(GEMINI_KEY_STORAGE, k); } catch (e) {}
+}
+function clearGeminiKey() {
+  try { sessionStorage.removeItem(GEMINI_KEY_STORAGE); } catch (e) {}
+}
 let sessionId = null;
 let me = null;
 let turnsThisSession = 0;
@@ -619,10 +688,15 @@ $("themeToggle").onclick = () => {
 };
 
 async function api(path, opts = {}) {
+  const key = getGeminiKey();
   const r = await fetch(path, {
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      ...(key ? { "X-Gemini-Key": key } : {}),
+      ...(opts.headers || {}),
+    },
   });
   if (r.status === 401) {
     showLogin();
@@ -652,8 +726,35 @@ async function onGoogleSignIn(response) {
 }
 window.onGoogleSignIn = onGoogleSignIn;
 
+function showApiKey() {
+  $("app").style.display = "none";
+  $("login").classList.remove("show");
+  $("apiKeyError").style.display = "none";
+  $("apiKeyInput").value = "";
+  $("apiKey").classList.add("show");
+  $("apiKeyInput").focus();
+}
+
+function saveApiKey() {
+  const k = $("apiKeyInput").value.trim();
+  if (!k) {
+    $("apiKeyError").textContent = "Please paste your Gemini API key.";
+    $("apiKeyError").style.display = "block";
+    return;
+  }
+  setGeminiKey(k);
+  $("apiKey").classList.remove("show");
+  init();
+}
+
+$("apiKeySave").onclick = saveApiKey;
+$("apiKeyInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); saveApiKey(); }
+});
+
 async function showLogin() {
   $("app").style.display = "none";
+  $("apiKey").classList.remove("show");
   $("login").classList.add("show");
   $("loginError").style.display = "none";
 
@@ -902,6 +1003,11 @@ function createPending() {
 }
 
 async function send(message) {
+  const key = getGeminiKey();
+  if (!key) {
+    showApiKey();
+    return;
+  }
   closeSidebar();
   appendMessage("user", message);
   $("send").disabled = true;
@@ -911,12 +1017,17 @@ async function send(message) {
     const res = await fetch("/api/chat", {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Gemini-Key": key },
       body: JSON.stringify({ session_id: sessionId, message, model: currentModel }),
     });
     if (res.status === 401) {
       pending.remove();
       showLogin();
+      return;
+    }
+    if (res.status === 400) {
+      pending.remove();
+      showApiKey();
       return;
     }
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
@@ -1021,7 +1132,14 @@ async function init() {
     await showLogin();
     return;
   }
+  // Logged in, but the AI key only lives in this browser session — prompt for
+  // it if we don't have it yet (first visit, or after closing the tab).
+  if (!getGeminiKey()) {
+    showApiKey();
+    return;
+  }
   $("login").classList.remove("show");
+  $("apiKey").classList.remove("show");
   $("app").style.display = "grid";
   $("who").innerHTML = `${escapeHtml(me.display_name)}`;
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
@@ -1113,6 +1231,7 @@ $("endSession").onclick = async () => {
 
 $("logout").onclick = async () => {
   flushSessionBeacon();
+  clearGeminiKey();
   try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   await fetch("/api/logout", { method: "POST" });
   location.reload();
@@ -1151,8 +1270,10 @@ $("consolidateBtn").onclick = async () => {
 function flushSessionBeacon() {
   if (!sessionId || turnsThisSession < 1) return;
   try {
+    // sendBeacon can't set headers, so the key rides in the body. Read it now —
+    // sessionStorage is still alive during pagehide.
     const blob = new Blob(
-      [JSON.stringify({ session_id: sessionId })],
+      [JSON.stringify({ session_id: sessionId, gemini_key: getGeminiKey() })],
       { type: "application/json" },
     );
     navigator.sendBeacon("/api/session/end", blob);
