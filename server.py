@@ -90,6 +90,19 @@ def _ctx(user_id: str = Depends(current_user)) -> UserCtx:
     return UserCtx(user_id=user_id)
 
 
+def gemini_key(x_gemini_key: str | None = Header(default=None)) -> str:
+    """The caller's Gemini API key, supplied per-request via the `X-Gemini-Key`
+    header. The key lives only in the user's browser session — the server never
+    stores it. Endpoints that call Gemini depend on this."""
+    key = (x_gemini_key or "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=400,
+            detail="missing Gemini API key (X-Gemini-Key header)",
+        )
+    return key
+
+
 class GoogleLoginBody(BaseModel):
     credential: str = Field(min_length=1)
 
@@ -186,12 +199,14 @@ class ChatBody(BaseModel):
 
 @app.post("/api/chat")
 def api_chat(
-    body: ChatBody, user_id: str = Depends(current_user)
+    body: ChatBody,
+    user_id: str = Depends(current_user),
+    api_key: str = Depends(gemini_key),
 ) -> StreamingResponse:
     """NDJSON stream of stage events. First line: {session_id}. Last: {stage:'done', ...}."""
     chosen = body.model if body.model in ALLOWED_MODELS else MODEL
     ctx = UserCtx(user_id=user_id, model=chosen)
-    client = _client()
+    client = _client(api_key)
     session_id = body.session_id or new_session(ctx)
 
     def gen():
@@ -207,13 +222,24 @@ def api_chat(
 
 class SessionEndBody(BaseModel):
     session_id: str
+    # sendBeacon (fired on pagehide) cannot set headers, so the browser passes
+    # the key in the body on that path. The explicit "End session" button uses
+    # the X-Gemini-Key header instead.
+    gemini_key: str | None = None
 
 
 @app.post("/api/session/end")
 def api_session_end(
-    body: SessionEndBody, ctx: UserCtx = Depends(_ctx)
+    body: SessionEndBody,
+    ctx: UserCtx = Depends(_ctx),
+    x_gemini_key: str | None = Header(default=None),
 ) -> dict:
-    client = _client()
+    key = (body.gemini_key or x_gemini_key or "").strip()
+    if not key:
+        # No key available (e.g. session already gone). Skip summarization
+        # rather than failing — the chat history is already persisted.
+        return {"saved": None, "reason": "no Gemini API key supplied"}
+    client = _client(key)
     name = summarize_session_to_skill(client, ctx, body.session_id)
     return {"saved": name}
 

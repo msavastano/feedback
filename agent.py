@@ -207,7 +207,15 @@ def list_sessions(ctx: UserCtx) -> list[dict]:
 
 # ---------- LLM helpers ----------
 
-def _client() -> genai.Client:
+def _client(api_key: str | None = None) -> genai.Client:
+    """Build a Gemini client.
+
+    Web deploy: each request supplies the user's own key (held only in their
+    browser session) — pass it here. CLI: `api_key` is None and the SDK falls
+    back to GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
+    """
+    if api_key:
+        return genai.Client(api_key=api_key)
     return genai.Client()
 
 
