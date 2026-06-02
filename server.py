@@ -41,6 +41,7 @@ from agent import (
     new_session,
     run_turn,
     run_turn_events,
+    session_turns,
     summarize_session_to_skill,
     validate_user_id,
 )
@@ -53,6 +54,16 @@ COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 CONSOLIDATE_TOKEN = os.environ.get("CONSOLIDATE_TOKEN", "").strip()
 CRON_SECRET = os.environ.get("CRON_SECRET", "").strip()  # Vercel Cron auto-injects
+
+# Comma-separated user_ids allowed to use Gemini code execution on the web path.
+# Code runs in Google's sandbox (no host access), but it is billable and abusable,
+# so it is an opt-in entitlement gated on the authenticated identity. Off for
+# everyone when unset.
+CODE_EXEC_USERS = {
+    u for u in (
+        s.strip() for s in os.environ.get("CODE_EXEC_USERS", "").split(",")
+    ) if u
+}
 
 app = FastAPI(title="Skill-memory agent")
 
@@ -209,10 +220,15 @@ def api_chat(
     client = _client(api_key)
     session_id = body.session_id or new_session(ctx)
 
+    allow_code_execution = user_id in CODE_EXEC_USERS
+
     def gen():
         yield json.dumps({"stage": "init", "session_id": session_id}) + "\n"
         try:
-            for ev in run_turn_events(client, ctx, session_id, body.message):
+            for ev in run_turn_events(
+                client, ctx, session_id, body.message,
+                allow_code_execution=allow_code_execution,
+            ):
                 yield json.dumps(ev) + "\n"
         except Exception as e:
             yield json.dumps({"stage": "error", "msg": str(e)}) + "\n"
@@ -247,6 +263,11 @@ def api_session_end(
 @app.get("/api/sessions")
 def api_sessions(ctx: UserCtx = Depends(_ctx)) -> list[dict]:
     return list_sessions(ctx)
+
+
+@app.get("/api/session/{session_id}")
+def api_session_get(session_id: str, ctx: UserCtx = Depends(_ctx)) -> dict:
+    return {"session_id": session_id, "turns": session_turns(ctx, session_id)}
 
 
 # ---------- skills ----------
@@ -362,3 +383,9 @@ def index() -> FileResponse:
     if not idx.exists():
         return JSONResponse({"error": "static/index.html missing"}, status_code=500)
     return FileResponse(idx)
+
+
+@app.get("/favicon.ico")
+def favicon() -> FileResponse:
+    """Browsers probe /favicon.ico at the root; serve the SVG icon."""
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")

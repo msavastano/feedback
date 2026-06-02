@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <title>Skill-memory agent</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -84,11 +85,12 @@
     background: var(--bg);
     color: var(--text);
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     transition: background 0.18s ease, color 0.18s ease;
   }
-  #app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; }
+  #app { display: grid; grid-template-columns: 260px 1fr; height: 100vh; height: 100dvh; }
   aside {
     background: var(--surface);
     border-right: 1px solid var(--border);
@@ -99,6 +101,8 @@
     overflow: hidden;
     min-height: 0;
   }
+  #menuToggle { display: none; }
+  #sidebarBackdrop { display: none; }
   aside .section {
     display: flex;
     flex-direction: column;
@@ -165,7 +169,7 @@
     font-size: 11px;
   }
   aside button.del:hover { color: var(--danger); }
-  main { display: flex; flex-direction: column; height: 100vh; }
+  main { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
   header {
     padding: 10px 16px;
     border-bottom: 1px solid var(--border);
@@ -223,6 +227,56 @@
   .msg.agent { align-self: flex-start; }
   .msg .role { font-size: 10px; color: var(--text-3); text-transform: uppercase; margin-bottom: 2px; }
   .msg .body { white-space: pre-wrap; }
+  /* rendered markdown (agent messages) — drop pre-wrap, let block elements flow */
+  .msg .body.md { white-space: normal; }
+  .msg .body.md > :first-child { margin-top: 0; }
+  .msg .body.md > :last-child { margin-bottom: 0; }
+  .msg .body.md p { margin: 0 0 8px; }
+  .msg .body.md h1,
+  .msg .body.md h2,
+  .msg .body.md h3,
+  .msg .body.md h4 { margin: 14px 0 6px; font-family: var(--font-display); line-height: 1.3; }
+  .msg .body.md h1 { font-size: 1.4em; }
+  .msg .body.md h2 { font-size: 1.25em; }
+  .msg .body.md h3 { font-size: 1.1em; }
+  .msg .body.md h4 { font-size: 1em; }
+  .msg .body.md ul,
+  .msg .body.md ol { margin: 0 0 8px; padding-left: 22px; }
+  .msg .body.md li { margin: 2px 0; }
+  .msg .body.md li > p { margin: 0; }
+  .msg .body.md a { color: var(--c-sys); text-decoration: underline; }
+  .msg .body.md code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .msg .body.md pre {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 0 0 8px;
+  }
+  .msg .body.md pre code { background: none; padding: 0; font-size: 0.85em; }
+  .msg .body.md blockquote {
+    margin: 0 0 8px;
+    padding-left: 12px;
+    border-left: 3px solid var(--border-strong);
+    color: var(--text-2);
+  }
+  .msg .body.md table {
+    border-collapse: collapse;
+    margin: 0 0 8px;
+    font-size: 0.95em;
+  }
+  .msg .body.md th,
+  .msg .body.md td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+  .msg .body.md th { background: var(--surface-2); }
+  .msg .body.md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .msg .body.md img { max-width: 100%; }
   .badges {
     font-size: 10px;
     color: var(--text-3);
@@ -517,6 +571,8 @@
   </div>
 </div>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 
 <div id="apiKey">
   <div class="card">
@@ -556,6 +612,7 @@
 </div>
 
 <div id="app" style="display:none">
+  <div id="sidebarBackdrop"></div>
   <aside>
     <button id="newSession" style="width:100%;background:var(--accent);color:var(--accent-fg);border:none;padding:9px;border-radius:var(--r-pill);cursor:pointer;flex:0 0 auto;font-weight:600">+ New chat</button>
     <div class="section open" id="sessionsSection">
@@ -575,7 +632,10 @@
   </aside>
   <main>
     <header>
-      <div class="who" id="who"></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button id="menuToggle" type="button" title="Menu" aria-label="Toggle sidebar">☰</button>
+        <div class="who" id="who"></div>
+      </div>
       <div style="display:flex;align-items:center;gap:8px">
         <select id="modelSelect" title="Select model"></select>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
@@ -745,11 +805,32 @@ function renderBadges(loaded, tokens, meta) {
   return parts.length ? `<div class="badges">${parts.join("")}</div>` : "";
 }
 
+// Render agent markdown → sanitized HTML. Falls back to plain text if the
+// libs failed to load (offline CDN) so messages never silently vanish.
+function renderMarkdown(el, text) {
+  if (!window.marked || !window.DOMPurify) {
+    el.textContent = text;
+    return;
+  }
+  const html = marked.parse(text || "", { gfm: true, breaks: true });
+  el.innerHTML = DOMPurify.sanitize(html);
+  el.classList.add("md");
+  for (const a of el.querySelectorAll("a")) {
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+  }
+}
+
 function appendMessage(role, text, loaded = null, tokens = null, meta = null) {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
   div.innerHTML = `<div class="role">${role}</div><div class="body"></div>`;
-  div.querySelector(".body").textContent = text;
+  const body = div.querySelector(".body");
+  if (role === "agent") {
+    renderMarkdown(body, text);
+  } else {
+    body.textContent = text;
+  }
   if (loaded) div.insertAdjacentHTML("beforeend", renderBadges(loaded, tokens, meta));
   $("chat").appendChild(div);
   $("chat").scrollTop = $("chat").scrollHeight;
@@ -768,6 +849,7 @@ async function refreshSidebar() {
     const li = document.createElement("li");
     if (s.session_id === sessionId) li.classList.add("active");
     li.innerHTML = `<div>${escapeHtml(s.first_message || "(empty)")}</div><div class="meta">${s.turns} turns · ${s.last_ts.slice(0, 16)}</div>`;
+    li.onclick = () => loadSession(s.session_id);
     sList.appendChild(li);
   }
   const skList = $("skills");
@@ -926,6 +1008,7 @@ async function send(message) {
     showApiKey();
     return;
   }
+  closeSidebar();
   appendMessage("user", message);
   $("send").disabled = true;
   const pending = createPending();
@@ -996,6 +1079,7 @@ async function send(message) {
 function handleStreamEvent(ev, pending, setFinal) {
   if (ev.stage === "init" && ev.session_id) {
     sessionId = ev.session_id;
+    try { localStorage.setItem(SESSION_STORAGE_KEY, sessionId); } catch (e) {}
     return;
   }
   if (ev.stage === "error") {
@@ -1007,6 +1091,31 @@ function handleStreamEvent(ev, pending, setFinal) {
     return;
   }
   if (ev.msg) pending.update(ev.msg);
+}
+
+async function loadSession(sid) {
+  if (!sid) return;
+  let data;
+  try {
+    data = await api(`/api/session/${encodeURIComponent(sid)}`);
+  } catch (e) {
+    try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+    return;
+  }
+  const turns = data.turns || [];
+  if (!turns.length) {
+    try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
+    return;
+  }
+  sessionId = sid;
+  turnsThisSession = turns.filter((t) => t.role === "user").length;
+  try { localStorage.setItem(SESSION_STORAGE_KEY, sid); } catch (e) {}
+  $("chat").innerHTML = "";
+  for (const t of turns) {
+    appendMessage(t.role === "model" ? "agent" : "user", t.text);
+  }
+  closeSidebar();
+  refreshSidebar();
 }
 
 async function init() {
@@ -1034,7 +1143,10 @@ async function init() {
   $("app").style.display = "grid";
   $("who").innerHTML = `${escapeHtml(me.display_name)}`;
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
-  refreshSidebar();
+  await refreshSidebar();
+  let stored = null;
+  try { stored = localStorage.getItem(SESSION_STORAGE_KEY); } catch (e) {}
+  if (stored) await loadSession(stored);
 }
 
 function initModelSelect(allowed) {
@@ -1056,6 +1168,20 @@ function initModelSelect(allowed) {
     localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
   };
 }
+
+// ---------- mobile sidebar drawer ----------
+function openSidebar() {
+  document.querySelector("aside").classList.add("open");
+  $("sidebarBackdrop").classList.add("show");
+}
+function closeSidebar() {
+  document.querySelector("aside").classList.remove("open");
+  $("sidebarBackdrop").classList.remove("show");
+}
+$("menuToggle").onclick = () => {
+  document.querySelector("aside").classList.contains("open") ? closeSidebar() : openSidebar();
+};
+$("sidebarBackdrop").onclick = closeSidebar;
 
 for (const btn of document.querySelectorAll(".section-toggle")) {
   btn.addEventListener("click", () => {
@@ -1084,7 +1210,9 @@ $("newSession").onclick = () => {
   flushSessionBeacon();
   sessionId = null;
   turnsThisSession = 0;
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
+  closeSidebar();
 };
 
 $("endSession").onclick = async () => {
@@ -1096,6 +1224,7 @@ $("endSession").onclick = async () => {
   if (res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);
   sessionId = null;
   turnsThisSession = 0;
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
   refreshSidebar();
 };
@@ -1103,6 +1232,7 @@ $("endSession").onclick = async () => {
 $("logout").onclick = async () => {
   flushSessionBeacon();
   clearGeminiKey();
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   await fetch("/api/logout", { method: "POST" });
   location.reload();
 };
@@ -1135,6 +1265,8 @@ $("consolidateBtn").onclick = async () => {
   }
 };
 
+// Explicit summarize-on-leave (new chat / logout). NOT bound to page
+// unload — a refresh must preserve the live session, not end it.
 function flushSessionBeacon() {
   if (!sessionId || turnsThisSession < 1) return;
   try {
@@ -1149,9 +1281,6 @@ function flushSessionBeacon() {
     // best-effort
   }
 }
-
-window.addEventListener("pagehide", flushSessionBeacon);
-window.addEventListener("beforeunload", flushSessionBeacon);
 
 init();
 </script>
