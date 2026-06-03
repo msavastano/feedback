@@ -580,12 +580,17 @@
     <p class="sub">This app uses Google's Gemini models. You bring your own key so usage is billed to your own Google account.</p>
 
     <div class="explain">
-      <strong>What is this?</strong> A Gemini API key is a secret token that lets this app make AI requests as you. It's free to create at Google AI Studio, and Gemini has a no-cost tier for light use.
+      <strong>What is this?</strong> A Gemini API key is a secret token that lets this app make AI requests as you. You create it at Google AI Studio.
       <ol>
         <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">aistudio.google.com/apikey</a> and sign in with your Google account.</li>
         <li>Click <strong>Create API key</strong> (pick a Google Cloud project, or let it make one).</li>
+        <li><strong>Enable billing</strong> on that project (<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Set up billing</a>) to move the key onto a <strong>paid tier</strong>.</li>
         <li>Copy the key — it looks like <code>AIza…</code> — and paste it below.</li>
       </ol>
+    </div>
+
+    <div class="notice">
+      ⚠️ <strong>A free-tier key won't work here.</strong> Each message fires several model calls, which blows past the free tier's per-minute limit and fails with a <code>429</code> quota error. Use a <strong>billing-enabled (paid tier) key</strong>. Pick the <strong>gemini-3.1-flash-lite</strong> model and light use runs only fractions of a penny.
     </div>
 
     <div class="notice">
