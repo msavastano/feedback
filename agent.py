@@ -18,12 +18,13 @@ import os
 import re
 import secrets
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from store import SessionStore, SkillStore, UserStore
 
@@ -240,6 +241,43 @@ def _client(api_key: str | None = None) -> genai.Client:
     return genai.Client()
 
 
+# Free-tier keys hit per-minute quotas easily: a single turn fires several
+# Gemini calls (pick → archive → respond → reflect). Back off and retry on 429
+# instead of letting the whole turn die.
+_RETRY_BACKOFF = (2, 8, 20, 40)
+
+
+def _retry_delay_from_error(e: errors.APIError) -> float | None:
+    """Pull RetryInfo.retryDelay (e.g. '17s') from a 429 error, if present."""
+    details = e.details or {}
+    inner = details.get("error", {}) if isinstance(details, dict) else {}
+    for d in inner.get("details", []) or []:
+        if "RetryInfo" in str(d.get("@type", "")):
+            raw = str(d.get("retryDelay", "")).rstrip("s")
+            try:
+                return float(raw)
+            except ValueError:
+                return None
+    return None
+
+
+def _generate(client: genai.Client, **kwargs):
+    """`generate_content` with bounded backoff on 429 RESOURCE_EXHAUSTED."""
+    for attempt, fallback in enumerate((*_RETRY_BACKOFF, None)):
+        try:
+            return client.models.generate_content(**kwargs)
+        except errors.APIError as e:
+            if getattr(e, "code", None) != 429 or fallback is None:
+                raise
+            wait = _retry_delay_from_error(e) or fallback
+            print(
+                f"[rate-limit] 429; retry {attempt + 1}/{len(_RETRY_BACKOFF)} "
+                f"in {wait}s",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+
 def _usage_dict(resp) -> dict:
     u = getattr(resp, "usage_metadata", None)
     if not u:
@@ -283,7 +321,8 @@ def pick_skills(
         "Empty array if none apply."
     )
     user = f"Catalog:\n{catalog}\n\nUser prompt:\n{prompt}\n\nJSON array:"
-    resp = client.models.generate_content(
+    resp = _generate(
+        client,
         model=model,
         contents=user,
         config=types.GenerateContentConfig(
@@ -318,7 +357,8 @@ def pick_archive_sections(
         f"Skill: {skill.name}\nDescription: {skill.description}\n"
         f"Sections:\n{headings}\n\nPrompt:\n{prompt}\n\nJSON array of indices:"
     )
-    resp = client.models.generate_content(
+    resp = _generate(
+        client,
         model=model,
         contents=user,
         config=types.GenerateContentConfig(
@@ -427,7 +467,8 @@ def respond(
     contents = history + [
         types.Content(role="user", parts=[types.Part(text=prompt)])
     ]
-    resp = client.models.generate_content(
+    resp = _generate(
+        client,
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(
@@ -572,7 +613,8 @@ def reflect_and_edit(
         f"User prompt:\n{prompt}\n\nAssistant answer:\n{answer}\n\n"
         "Return edits JSON:"
     )
-    resp = client.models.generate_content(
+    resp = _generate(
+        client,
         model=model,
         contents=user,
         config=types.GenerateContentConfig(
@@ -621,7 +663,8 @@ def summarize_session_to_skill(
         f"{c.role.upper()}: {''.join(p.text or '' for p in c.parts)}"
         for c in history
     )
-    resp = client.models.generate_content(
+    resp = _generate(
+        client,
         model=ctx.model,
         contents=f"Transcript:\n{transcript}\n\nReturn JSON:",
         config=types.GenerateContentConfig(
@@ -793,17 +836,21 @@ def run_turn_events(
     append_turn(ctx, session_id, "user", prompt)
     append_turn(ctx, session_id, "model", answer, usage=usage)
 
-    yield {"stage": "reflect", "msg": "Reflecting on what to remember…"}
     scoped_for_reflect = system_skills + active_loaded
-    edits = reflect_and_edit(
-        client,
-        prompt,
-        answer,
-        all_skills=skills,
-        scoped_skills=scoped_for_reflect,
-        model=ctx.model,
-    )
-    applied = apply_edits(ctx, edits)
+    if _reflect_enabled():
+        yield {"stage": "reflect", "msg": "Reflecting on what to remember…"}
+        edits = reflect_and_edit(
+            client,
+            prompt,
+            answer,
+            all_skills=skills,
+            scoped_skills=scoped_for_reflect,
+            model=ctx.model,
+        )
+        applied = apply_edits(ctx, edits)
+    else:
+        # Skip the reflect call to conserve per-minute quota (free-tier keys).
+        applied = []
 
     meta = {
         "catalog": len(skills),
@@ -862,6 +909,15 @@ def run_turn(
 def _code_exec_enabled() -> bool:
     """CLI code execution toggle. On by default; set AGENT_CODE_EXEC=0 to disable."""
     return os.environ.get("AGENT_CODE_EXEC", "1").strip().lower() not in (
+        "0", "false", "no", "off", ""
+    )
+
+
+def _reflect_enabled() -> bool:
+    """Per-turn memory reflection toggle. On by default; set AGENT_REFLECT=0 to
+    skip the reflect call and save one Gemini request per turn (free-tier quota).
+    Session-end summarization still runs and persists memory."""
+    return os.environ.get("AGENT_REFLECT", "1").strip().lower() not in (
         "0", "false", "no", "off", ""
     )
 

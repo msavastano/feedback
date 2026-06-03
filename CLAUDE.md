@@ -31,6 +31,10 @@ $env:AGENT_DEBUG = "1"
 # history window cap (default 20 turns sent to respond)
 $env:AGENT_HISTORY_CAP = "40"
 
+# skip per-turn reflect call to save one Gemini request/turn (on by default).
+# session-end summarization still persists memory. Helps free-tier rate limits.
+$env:AGENT_REFLECT = "0"   # disable
+
 # CLI code execution (Gemini built-in sandbox; on by default, CLI only — never web)
 # respond() sets a per-model thinking_level (see THINKING_LEVELS in agent.py);
 # tool use needs thinking engaged or the model mis-emits a bare function_call.
