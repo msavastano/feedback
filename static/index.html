@@ -1054,7 +1054,9 @@ async function send(message) {
       } catch {}
     }
     pending.remove();
-    if (finalEvent) {
+    if (finalEvent && finalEvent.stage === "error") {
+      appendMessage("agent", `[error: ${finalEvent.msg}]`);
+    } else if (finalEvent) {
       appendMessage("agent", finalEvent.answer, finalEvent.loaded, finalEvent.tokens, finalEvent.meta);
       if (finalEvent.edits && finalEvent.edits.length) {
         const note = document.createElement("div");
@@ -1084,6 +1086,7 @@ function handleStreamEvent(ev, pending, setFinal) {
   }
   if (ev.stage === "error") {
     pending.update(`error: ${ev.msg}`);
+    setFinal(ev);
     return;
   }
   if (ev.stage === "done") {
