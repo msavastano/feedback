@@ -40,6 +40,23 @@ THINKING_LEVELS = {
     "gemini-3.1-flash-lite": types.ThinkingLevel.MEDIUM,
 }
 
+# AGENT_THINKING_LEVEL overrides the per-model default for the respond() call.
+# Accepts minimal | low | medium | high (case-insensitive). Unset/invalid =>
+# fall back to THINKING_LEVELS[model].
+THINKING_LEVEL_NAMES = {
+    "minimal": types.ThinkingLevel.MINIMAL,
+    "low": types.ThinkingLevel.LOW,
+    "medium": types.ThinkingLevel.MEDIUM,
+    "high": types.ThinkingLevel.HIGH,
+}
+
+
+def resolve_thinking_level(model):
+    override = os.environ.get("AGENT_THINKING_LEVEL", "").strip().lower()
+    if override in THINKING_LEVEL_NAMES:
+        return THINKING_LEVEL_NAMES[override]
+    return THINKING_LEVELS.get(model, types.ThinkingLevel.MEDIUM)
+
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
@@ -475,9 +492,7 @@ def respond(
             system_instruction=sys_prompt,
             tools=tools,
             thinking_config=types.ThinkingConfig(
-                thinking_level=THINKING_LEVELS.get(
-                    model, types.ThinkingLevel.MEDIUM
-                )
+                thinking_level=resolve_thinking_level(model)
             ),
         ),
     )

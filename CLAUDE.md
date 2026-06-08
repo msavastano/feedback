@@ -39,6 +39,10 @@ $env:AGENT_REFLECT = "0"   # disable
 # respond() sets a per-model thinking_level (see THINKING_LEVELS in agent.py);
 # tool use needs thinking engaged or the model mis-emits a bare function_call.
 $env:AGENT_CODE_EXEC = "0"   # disable
+
+# Override the per-model thinking level for respond() (minimal|low|medium|high,
+# case-insensitive). Invalid/unset => per-model THINKING_LEVELS default.
+$env:AGENT_THINKING_LEVEL = "high"
 ```
 
 No test suite, no linter config. Manual testing via CLI or `/api/chat`.
