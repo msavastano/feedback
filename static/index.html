@@ -643,6 +643,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <select id="modelSelect" title="Select model"></select>
+        <select id="thinkingSelect" title="Thinking level"></select>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
         <button id="endSession">End session</button>
         <button id="logout">Logout</button>
@@ -660,6 +661,9 @@
 const $ = (id) => document.getElementById(id);
 const DEFAULT_MODEL = "gemini-3.5-flash";
 const MODEL_STORAGE_KEY = "agent_model";
+// Empty string = "Auto" (server falls back to env / per-model default).
+const DEFAULT_THINKING = "";
+const THINKING_STORAGE_KEY = "agent_thinking";
 // Gemini key lives only in sessionStorage: it survives reloads within the tab
 // but is erased when the tab/browser closes — matching "lasts as long as the
 // browser session." Never persisted to localStorage or the server.
@@ -677,6 +681,7 @@ let sessionId = null;
 let me = null;
 let turnsThisSession = 0;
 let currentModel = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
+let currentThinking = localStorage.getItem(THINKING_STORAGE_KEY) ?? DEFAULT_THINKING;
 const THEME_STORAGE_KEY = "agent_theme";
 
 function currentTheme() {
@@ -1023,7 +1028,7 @@ async function send(message) {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-Gemini-Key": key },
-      body: JSON.stringify({ session_id: sessionId, message, model: currentModel }),
+      body: JSON.stringify({ session_id: sessionId, message, model: currentModel, thinking_level: currentThinking || null }),
     });
     if (res.status === 401) {
       pending.remove();
@@ -1151,6 +1156,7 @@ async function init() {
   $("app").style.display = "grid";
   $("who").innerHTML = `${escapeHtml(me.display_name)}`;
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
+  initThinkingSelect(me.allowed_thinking_levels || []);
   await refreshSidebar();
   let stored = null;
   try { stored = localStorage.getItem(SESSION_STORAGE_KEY); } catch (e) {}
@@ -1174,6 +1180,28 @@ function initModelSelect(allowed) {
   sel.onchange = () => {
     currentModel = sel.value;
     localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
+  };
+}
+
+function initThinkingSelect(allowed) {
+  const sel = $("thinkingSelect");
+  // "" => Auto (server-side default). Real levels follow.
+  const opts = [["", "Auto"]].concat(allowed.map((l) => [l, l]));
+  if (!opts.some(([v]) => v === currentThinking)) {
+    currentThinking = DEFAULT_THINKING;
+    localStorage.setItem(THINKING_STORAGE_KEY, currentThinking);
+  }
+  sel.innerHTML = "";
+  for (const [val, label] of opts) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = "think: " + label;
+    if (val === currentThinking) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => {
+    currentThinking = sel.value;
+    localStorage.setItem(THINKING_STORAGE_KEY, currentThinking);
   };
 }
 

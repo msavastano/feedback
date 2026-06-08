@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from agent import (
     ALLOWED_MODELS,
     MODEL,
+    THINKING_LEVEL_NAMES,
     UserCtx,
     _client,
     apply_edits,
@@ -197,6 +198,7 @@ def api_me(user_id: str = Depends(current_user)) -> dict:
         "picture": profile.get("picture", ""),
         "model": MODEL,
         "allowed_models": list(ALLOWED_MODELS),
+        "allowed_thinking_levels": list(THINKING_LEVEL_NAMES.keys()),
     }
 
 
@@ -206,6 +208,7 @@ class ChatBody(BaseModel):
     message: str = Field(min_length=1)
     session_id: str | None = None
     model: str | None = None
+    thinking_level: str | None = None
 
 
 @app.post("/api/chat")
@@ -216,7 +219,9 @@ def api_chat(
 ) -> StreamingResponse:
     """NDJSON stream of stage events. First line: {session_id}. Last: {stage:'done', ...}."""
     chosen = body.model if body.model in ALLOWED_MODELS else MODEL
-    ctx = UserCtx(user_id=user_id, model=chosen)
+    ctx = UserCtx(
+        user_id=user_id, model=chosen, thinking_level=body.thinking_level
+    )
     client = _client(api_key)
     session_id = body.session_id or new_session(ctx)
 

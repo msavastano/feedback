@@ -51,10 +51,13 @@ THINKING_LEVEL_NAMES = {
 }
 
 
-def resolve_thinking_level(model):
-    override = os.environ.get("AGENT_THINKING_LEVEL", "").strip().lower()
-    if override in THINKING_LEVEL_NAMES:
-        return THINKING_LEVEL_NAMES[override]
+def resolve_thinking_level(model, override=None):
+    """Pick the thinking level. Precedence: explicit override (per-request, e.g.
+    from the UI) -> AGENT_THINKING_LEVEL env -> per-model default -> MEDIUM."""
+    for cand in (override, os.environ.get("AGENT_THINKING_LEVEL")):
+        name = (cand or "").strip().lower()
+        if name in THINKING_LEVEL_NAMES:
+            return THINKING_LEVEL_NAMES[name]
     return THINKING_LEVELS.get(model, types.ThinkingLevel.MEDIUM)
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -98,11 +101,16 @@ class UserCtx:
     """Pure identity carrier. No filesystem state."""
     user_id: str
     model: str = MODEL
+    # Optional per-request thinking level (minimal|low|medium|high). None =>
+    # fall back to AGENT_THINKING_LEVEL env / per-model default in respond().
+    thinking_level: str | None = None
 
     def __post_init__(self) -> None:
         validate_user_id(self.user_id)
         if self.model not in ALLOWED_MODELS:
             self.model = MODEL
+        name = (self.thinking_level or "").strip().lower()
+        self.thinking_level = name if name in THINKING_LEVEL_NAMES else None
 
 
 def get_secret_key() -> bytes:
@@ -448,6 +456,7 @@ def respond(
     history: list[types.Content],
     model: str = MODEL,
     allow_code_execution: bool = False,
+    thinking_level: str | None = None,
 ) -> tuple[str, dict]:
     """Main answer. Has google_search grounding (and optional code execution).
     Returns (text, usage)."""
@@ -492,7 +501,7 @@ def respond(
             system_instruction=sys_prompt,
             tools=tools,
             thinking_config=types.ThinkingConfig(
-                thinking_level=resolve_thinking_level(model)
+                thinking_level=resolve_thinking_level(model, thinking_level)
             ),
         ),
     )
@@ -845,6 +854,7 @@ def run_turn_events(
         history,
         model=ctx.model,
         allow_code_execution=allow_code_execution,
+        thinking_level=ctx.thinking_level,
     )
 
     yield {"stage": "persist", "msg": "Saving turn to session log…"}
