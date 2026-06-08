@@ -1012,6 +1012,18 @@ function createPending() {
   };
 }
 
+// Lightweight busy row for non-streaming actions (load/end session) so the UI
+// shows something is happening during the network gap. Returns a remove handle.
+function showBusy(text) {
+  const div = document.createElement("div");
+  div.className = "pending";
+  div.innerHTML = `<div class="spinner"></div><div class="status"></div>`;
+  div.querySelector(".status").textContent = text;
+  $("chat").appendChild(div);
+  $("chat").scrollTop = $("chat").scrollHeight;
+  return { remove() { div.remove(); } };
+}
+
 async function send(message) {
   const key = getGeminiKey();
   if (!key) {
@@ -1108,13 +1120,16 @@ function handleStreamEvent(ev, pending, setFinal) {
 
 async function loadSession(sid) {
   if (!sid) return;
+  const busy = showBusy("Loading session…");
   let data;
   try {
     data = await api(`/api/session/${encodeURIComponent(sid)}`);
   } catch (e) {
+    busy.remove();
     try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
     return;
   }
+  busy.remove();
   const turns = data.turns || [];
   if (!turns.length) {
     try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) {}
@@ -1253,15 +1268,24 @@ $("newSession").onclick = () => {
 
 $("endSession").onclick = async () => {
   if (!sessionId) return;
-  const res = await api("/api/session/end", {
-    method: "POST",
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  if (res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);
+  const btn = $("endSession");
+  btn.disabled = true;
+  const busy = showBusy("Ending session — summarizing to memory…");
+  let res;
+  try {
+    res = await api("/api/session/end", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  } finally {
+    busy.remove();
+    btn.disabled = false;
+  }
   sessionId = null;
   turnsThisSession = 0;
   try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
+  if (res && res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);
   refreshSidebar();
 };
 
