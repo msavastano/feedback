@@ -380,8 +380,55 @@
     border-top: 1px solid var(--border);
     padding: 10px 16px;
     display: flex;
+    flex-direction: column;
     gap: 8px;
   }
+  #composer .composer-row { display: flex; gap: 8px; }
+  #attachBar {
+    display: none;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  #attachBar.show { display: flex; }
+  #attachBar .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-pill);
+    padding: 3px 10px;
+    font-size: 12px;
+    color: var(--text-2);
+    max-width: 260px;
+  }
+  #attachBar .chip .fname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #attachBar .chip .fsize { color: var(--text-mute); font-size: 11px; }
+  #attachBar .chip button {
+    background: none;
+    border: none;
+    color: var(--text-mute);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0;
+    line-height: 1;
+  }
+  #attachBar .chip button:hover { color: var(--danger); }
+  #attachBtn {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    padding: 0 14px;
+    font-size: 16px;
+    transition: background 0.12s ease;
+  }
+  #attachBtn:hover { background: var(--surface-3); }
   #composer textarea {
     flex: 1;
     background: var(--surface);
@@ -397,7 +444,7 @@
     outline: none;
     border-color: var(--text-mute);
   }
-  #composer button {
+  #composer #send {
     background: var(--accent);
     color: var(--accent-fg);
     border: none;
@@ -407,8 +454,8 @@
     font-weight: 600;
     transition: background 0.12s ease;
   }
-  #composer button:hover { background: var(--accent-hover); }
-  #composer button:disabled { opacity: 0.5; }
+  #composer #send:hover { background: var(--accent-hover); }
+  #composer #send:disabled { opacity: 0.5; }
   /* skill hover preview */
   #skillPop {
     position: fixed;
@@ -675,8 +722,14 @@
     </header>
     <div id="chat"></div>
     <form id="composer">
-      <textarea id="input" placeholder="Type your message…" rows="2"></textarea>
-      <button type="submit" id="send">Send</button>
+      <div id="attachBar"></div>
+      <div class="composer-row">
+        <button type="button" id="attachBtn" title="Attach files (PDF, image, spreadsheet, text)">📎</button>
+        <textarea id="input" placeholder="Type your message…" rows="2"></textarea>
+        <button type="submit" id="send">Send</button>
+      </div>
+      <input type="file" id="fileInput" multiple hidden
+             accept=".pdf,.txt,.md,.csv,.tsv,.json,.xml,.yaml,.yml,.log,.xlsx,image/*" />
     </form>
   </main>
 </div>
@@ -692,6 +745,9 @@ const THINKING_STORAGE_KEY = "agent_thinking";
 // but is erased when the tab/browser closes — matching "lasts as long as the
 // browser session." Never persisted to localStorage or the server.
 const GEMINI_KEY_STORAGE = "agent_gemini_key";
+// Last-open session id, for resume-on-reload. (Was referenced but never
+// defined before — every use is inside try/catch, so resume silently no-oped.)
+const SESSION_STORAGE_KEY = "agent_session";
 function getGeminiKey() {
   try { return sessionStorage.getItem(GEMINI_KEY_STORAGE) || ""; } catch (e) { return ""; }
 }
@@ -961,6 +1017,96 @@ async function refreshSidebar() {
   $("consolidateBtn").textContent = `Consolidate ${sessionRollups} sessions…`;
 }
 
+// ---------- session-only attachments ----------
+// Files live ONLY in this array (browser memory) for the life of the chat
+// session and are re-sent with every message so follow-up questions keep
+// working. Nothing is uploaded for storage — the server forwards bytes to
+// Gemini and persists just a "[attached: …]" text marker.
+const ATTACH_MAX_FILES = 5;
+const ATTACH_MAX_FILE_BYTES = 8 * 1024 * 1024;
+const ATTACH_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+const EXT_MIME = {
+  pdf: "application/pdf", txt: "text/plain", md: "text/markdown",
+  csv: "text/csv", tsv: "text/tab-separated-values", json: "application/json",
+  xml: "application/xml", yaml: "application/yaml", yml: "application/yaml",
+  log: "text/plain",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+let sessionAttachments = [];
+
+function guessMime(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  return EXT_MIME[ext] || "";
+}
+
+function fmtSize(bytes) {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+async function addAttachment(file) {
+  if (sessionAttachments.length >= ATTACH_MAX_FILES) {
+    alert(`Max ${ATTACH_MAX_FILES} attachments.`);
+    return;
+  }
+  if (file.size > ATTACH_MAX_FILE_BYTES) {
+    alert(`${file.name}: too large (max 8 MB per file).`);
+    return;
+  }
+  const total = sessionAttachments.reduce((n, a) => n + a.size, 0) + file.size;
+  if (total > ATTACH_MAX_TOTAL_BYTES) {
+    alert("Attachments exceed 16 MB total.");
+    return;
+  }
+  const b64 = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",", 2)[1] || "");
+    r.onerror = () => reject(new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+  sessionAttachments.push({
+    name: file.name,
+    mime: file.type || guessMime(file.name),
+    data: b64,
+    size: file.size,
+  });
+  renderAttachBar();
+}
+
+function renderAttachBar() {
+  const bar = $("attachBar");
+  bar.innerHTML = "";
+  for (let i = 0; i < sessionAttachments.length; i++) {
+    const a = sessionAttachments[i];
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.innerHTML =
+      `📎 <span class="fname">${escapeHtml(a.name)}</span>` +
+      `<span class="fsize">${fmtSize(a.size)}</span>` +
+      `<button type="button" title="Remove">×</button>`;
+    chip.querySelector("button").onclick = () => {
+      sessionAttachments.splice(i, 1);
+      renderAttachBar();
+    };
+    bar.appendChild(chip);
+  }
+  bar.classList.toggle("show", sessionAttachments.length > 0);
+}
+
+function clearAttachments() {
+  sessionAttachments = [];
+  renderAttachBar();
+}
+
+$("attachBtn").onclick = () => $("fileInput").click();
+$("fileInput").onchange = async (e) => {
+  for (const f of Array.from(e.target.files || [])) {
+    try { await addAttachment(f); } catch (err) { alert(`${f.name}: ${err.message}`); }
+  }
+  e.target.value = "";
+};
+
 function escapeHtml(s) {
   return (s || "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1083,7 +1229,11 @@ async function send(message) {
     return;
   }
   closeSidebar();
-  appendMessage("user", message);
+  // Mirror the server-side persisted text: prompt + attachment markers.
+  const manifest = sessionAttachments
+    .map((a) => `[attached: ${a.name} (${a.mime || "file"}, ${fmtSize(a.size)})]`)
+    .join("\n");
+  appendMessage("user", manifest ? `${message}\n\n${manifest}` : message);
   $("send").disabled = true;
   const pending = createPending();
   let finalEvent = null;
@@ -1092,7 +1242,15 @@ async function send(message) {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-Gemini-Key": key },
-      body: JSON.stringify({ session_id: sessionId, message, model: currentModel, thinking_level: currentThinking || null }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        message,
+        model: currentModel,
+        thinking_level: currentThinking || null,
+        attachments: sessionAttachments.length
+          ? sessionAttachments.map((a) => ({ name: a.name, mime: a.mime, data: a.data }))
+          : null,
+      }),
     });
     if (res.status === 401) {
       pending.remove();
@@ -1190,6 +1348,7 @@ async function loadSession(sid) {
   }
   sessionId = sid;
   turnsThisSession = turns.filter((t) => t.role === "user").length;
+  clearAttachments(); // uploads belong to the tab session they were added in
   try { localStorage.setItem(SESSION_STORAGE_KEY, sid); } catch (e) {}
   $("chat").innerHTML = "";
   for (const t of turns) {
@@ -1314,6 +1473,7 @@ $("newSession").onclick = () => {
   flushSessionBeacon();
   sessionId = null;
   turnsThisSession = 0;
+  clearAttachments();
   try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
   closeSidebar();
@@ -1336,6 +1496,7 @@ $("endSession").onclick = async () => {
   }
   sessionId = null;
   turnsThisSession = 0;
+  clearAttachments();
   try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
   if (res && res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);

@@ -85,6 +85,21 @@ Skills are markdown files with YAML frontmatter (`name`, `description`). Tier ==
 
 `run_turn_events` is a generator yielding `{stage, msg, ...}` dicts; the server streams these as NDJSON. `run_turn` drains it for CLI.
 
+### Session-only attachments
+
+Uploads (PDF, images, .xlsx/.csv spreadsheets, text docs) are **never stored**.
+The browser keeps files in JS memory (`sessionAttachments` in
+[static/index.html](static/index.html)) and re-sends them with every `/api/chat`
+call so multi-turn Q&A over a document works; they vanish on reload/new
+session. Server side, `prepare_attachments()` ([agent.py](agent.py)) decodes +
+validates (5 files, 8MB each, 16MB total), `attachment_parts()` turns them into
+Gemini parts — PDF/image as native bytes, text inline, .xlsx converted to CSV
+text via openpyxl (capped at `ATTACH_SHEET_ROW_CAP` rows/sheet). Only a
+`[attached: name (mime, size)]` marker line is appended to the persisted user
+turn, so reflect/session-summary still record what was discussed. Attachment
+turns skip the image-generation fast path. CLI: `/attach <path>` adds a file
+(re-sent each turn), `/detach` clears.
+
 ### Image generation fast-path
 
 Before step 2, `run_turn_events` runs `detect_image_intent()` (cheap classifier on the user's chat model). On a hit it routes to `generate_image()` (model `IMAGE_MODEL` = `gemini-3.1-flash-image`, `response_modalities=[TEXT, IMAGE]`) and **returns early** — no pick/archive/respond/reflect. The image bytes ride in the final `done` event (base64) for live display + download; they are **never written to the turns table**. Only a prompt note is persisted via `_remember_image()` into an `image-generations` active skill. `_store_image_blob()` is the opt-in "cheap storage" path (Vercel Blob, gated on `BLOB_READ_WRITE_TOKEN`): when present the image URL is uploaded, embedded in the saved turn as markdown, and logged in the skill so it survives reload. Toggle the whole feature with `AGENT_IMAGE_GEN`.

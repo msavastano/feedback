@@ -40,6 +40,7 @@ from agent import (
     list_sessions,
     load_skills,
     new_session,
+    prepare_attachments,
     run_turn,
     run_turn_events,
     session_turns,
@@ -204,11 +205,19 @@ def api_me(user_id: str = Depends(current_user)) -> dict:
 
 # ---------- chat ----------
 
+class ChatAttachment(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    mime: str = ""
+    data: str = Field(min_length=1)  # base64 file bytes
+
+
 class ChatBody(BaseModel):
     message: str = Field(min_length=1)
     session_id: str | None = None
     model: str | None = None
     thinking_level: str | None = None
+    # Session-only uploads: bytes go to Gemini for this turn, never to the DB.
+    attachments: list[ChatAttachment] | None = None
 
 
 @app.post("/api/chat")
@@ -222,6 +231,15 @@ def api_chat(
     ctx = UserCtx(
         user_id=user_id, model=chosen, thinking_level=body.thinking_level
     )
+    attachments = None
+    if body.attachments:
+        try:
+            attachments = prepare_attachments(
+                [a.model_dump() for a in body.attachments]
+            )
+        except ValueError as e:
+            # 422 (not 400): the UI treats 400 as "missing Gemini key".
+            raise HTTPException(status_code=422, detail=str(e))
     client = _client(api_key)
     session_id = body.session_id or new_session(ctx)
 
@@ -233,6 +251,7 @@ def api_chat(
             for ev in run_turn_events(
                 client, ctx, session_id, body.message,
                 allow_code_execution=allow_code_execution,
+                attachments=attachments,
             ):
                 yield json.dumps(ev) + "\n"
         except Exception as e:

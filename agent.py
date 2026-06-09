@@ -463,9 +463,10 @@ def respond(
     model: str = MODEL,
     allow_code_execution: bool = False,
     thinking_level: str | None = None,
+    attachments: list[Attachment] | None = None,
 ) -> tuple[str, dict]:
     """Main answer. Has google_search grounding (and optional code execution).
-    Returns (text, usage)."""
+    Attachments ride as extra parts on the user message. Returns (text, usage)."""
     sys_block = "\n\n".join(
         f"## [system] {s.name}\n{s.body.strip()}" for s in system_skills
     )
@@ -493,12 +494,17 @@ def respond(
             "calculation, data manipulation, or anything better solved by "
             "executing code than by reasoning in prose."
         )
+    if attachments:
+        sys_prompt += (
+            "\n\nThe user attached files to this message (documents, images, "
+            "or spreadsheet data). They are included with the message — read "
+            "them and answer based on their actual content."
+        )
     tools = [types.Tool(google_search=types.GoogleSearch())]
     if allow_code_execution:
         tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
-    contents = history + [
-        types.Content(role="user", parts=[types.Part(text=prompt)])
-    ]
+    user_parts = attachment_parts(attachments or []) + [types.Part(text=prompt)]
+    contents = history + [types.Content(role="user", parts=user_parts)]
     resp = _generate(
         client,
         model=model,
@@ -527,6 +533,150 @@ def respond(
         print(f"[respond parts] {kinds} code_executed={ran_code}")
     usage = _log_usage("respond", resp)
     return _assemble_answer(resp), usage
+
+
+# ---------- attachments (session-only uploads) ----------
+#
+# Files ride along with a chat request as extra Gemini parts. They are NEVER
+# persisted server-side — only a text marker ("[attached: …]") lands in the
+# turns table, so reflect/session-summary still capture WHAT was discussed.
+# The browser keeps the bytes for the life of the tab session and re-sends
+# them each turn so follow-up questions keep working.
+
+ATTACH_MAX_FILES = 5
+ATTACH_MAX_FILE_BYTES = 8 * 1024 * 1024    # per file
+ATTACH_MAX_TOTAL_BYTES = 16 * 1024 * 1024  # per request (Gemini inline ~20MB)
+ATTACH_SHEET_ROW_CAP = 500                 # rows per sheet sent to the model
+
+ATTACH_TEXT_MIMES = {
+    "application/json",
+    "application/xml",
+    "application/x-yaml",
+    "application/yaml",
+    "text/csv",
+    "text/tab-separated-values",
+}
+
+ATTACH_XLSX_MIME = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+@dataclass
+class Attachment:
+    """One validated upload. Either raw bytes (pdf/image — Gemini reads them
+    natively) or extracted text (text docs, spreadsheets)."""
+    name: str
+    mime: str
+    data: bytes            # empty when `text` carries the content
+    text: str | None
+    size: int              # original upload size, for display
+
+
+def _xlsx_to_text(data: bytes) -> str:
+    """Render an .xlsx workbook as CSV text, one section per sheet."""
+    import csv as _csv
+    import io
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    out: list[str] = []
+    try:
+        for ws in wb.worksheets:
+            buf = io.StringIO()
+            writer = _csv.writer(buf)
+            truncated = False
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= ATTACH_SHEET_ROW_CAP:
+                    truncated = True
+                    break
+                writer.writerow(["" if c is None else c for c in row])
+            section = f"### Sheet: {ws.title}\n{buf.getvalue().strip()}"
+            if truncated:
+                section += f"\n(truncated at {ATTACH_SHEET_ROW_CAP} rows)"
+            out.append(section)
+    finally:
+        wb.close()
+    return "\n\n".join(out)
+
+
+def prepare_attachments(raw: list[dict]) -> list[Attachment]:
+    """Decode + validate uploads ({name, mime, data(b64)} dicts).
+
+    Raises ValueError with a user-facing message on anything off-spec."""
+    if len(raw) > ATTACH_MAX_FILES:
+        raise ValueError(f"too many attachments (max {ATTACH_MAX_FILES})")
+    total = 0
+    out: list[Attachment] = []
+    for item in raw:
+        name = os.path.basename(str(item.get("name") or "file")).strip()[:120] or "file"
+        mime = (str(item.get("mime") or "").strip().lower()
+                or "application/octet-stream")
+        try:
+            data = base64.b64decode(item.get("data") or "", validate=True)
+        except (ValueError, TypeError):
+            raise ValueError(f"{name}: invalid base64 payload")
+        if not data:
+            raise ValueError(f"{name}: empty file")
+        if len(data) > ATTACH_MAX_FILE_BYTES:
+            raise ValueError(
+                f"{name}: too large (max {ATTACH_MAX_FILE_BYTES // (1024 * 1024)}MB per file)"
+            )
+        total += len(data)
+        if total > ATTACH_MAX_TOTAL_BYTES:
+            raise ValueError(
+                f"attachments too large together (max {ATTACH_MAX_TOTAL_BYTES // (1024 * 1024)}MB)"
+            )
+        size = len(data)
+        if mime == "application/pdf" or mime.startswith("image/"):
+            out.append(Attachment(name, mime, data, None, size))
+        elif mime == ATTACH_XLSX_MIME or name.lower().endswith(".xlsx"):
+            try:
+                text = _xlsx_to_text(data)
+            except Exception as e:
+                raise ValueError(f"{name}: could not read spreadsheet ({e})")
+            out.append(Attachment(name, "text/csv", b"", text, size))
+        elif mime.startswith("text/") or mime in ATTACH_TEXT_MIMES:
+            out.append(
+                Attachment(name, mime, b"", data.decode("utf-8", errors="replace"), size)
+            )
+        else:
+            # Unknown mime: accept if it decodes cleanly as UTF-8 text.
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError(
+                    f"{name}: unsupported file type ({mime}). "
+                    "Supported: PDF, images, spreadsheets (.xlsx/.csv), text docs."
+                )
+            out.append(Attachment(name, "text/plain", b"", text, size))
+    return out
+
+
+def attachment_parts(attachments: list[Attachment]) -> list[types.Part]:
+    """Gemini parts for the user message: native bytes for pdf/image, fenced
+    text blocks for everything else."""
+    parts: list[types.Part] = []
+    for a in attachments:
+        if a.text is not None:
+            parts.append(types.Part(
+                text=(
+                    f"--- ATTACHED FILE: {a.name} ({a.mime}) ---\n"
+                    f"{a.text}\n--- END FILE: {a.name} ---"
+                )
+            ))
+        else:
+            parts.append(types.Part.from_bytes(data=a.data, mime_type=a.mime))
+    return parts
+
+
+def attachment_manifest(attachments: list[Attachment]) -> str:
+    """Text markers persisted to the turns table in place of the bytes."""
+    return "\n".join(
+        f"[attached: {a.name} ({a.mime}, {max(1, a.size // 1024)} KB)]"
+        for a in attachments
+    )
 
 
 # ---------- image generation ----------
@@ -949,21 +1099,33 @@ def run_turn_events(
     session_id: str,
     prompt: str,
     allow_code_execution: bool = False,
+    attachments: list[Attachment] | None = None,
 ):
     """Generator. Yields {stage, msg, ...} dicts. Final event has stage='done'.
 
     `allow_code_execution` enables Gemini's code execution tool in `respond`.
     CLI passes True; the server leaves it False to keep the web path text-only.
+
+    `attachments` are session-only uploads: their bytes go to Gemini for this
+    turn but only a text marker is persisted (see attachment_manifest).
     """
     yield {"stage": "load", "msg": "Reading skill catalog…"}
     skills = load_skills(ctx)
     system_skills = [s for s in skills if s.tier == "system"]
 
+    # The text we persist + reflect on: prompt plus markers for any uploads, so
+    # memory captures that (and which) files were discussed without the bytes.
+    persisted_prompt = prompt
+    if attachments:
+        persisted_prompt = f"{prompt}\n\n{attachment_manifest(attachments)}"
+
     # Image-generation fast path: if the user is asking for a NEW picture, route
     # to the native-image model and return early — no skill picking / respond /
     # reflect. The image rides in the final `done` event (and a live `image`
     # event) but is NOT written to the turns table; only a prompt note persists.
-    if _image_gen_enabled():
+    # Skipped when files are attached — those turns are about analysing the
+    # uploads, not generating art.
+    if _image_gen_enabled() and not attachments:
         yield {"stage": "image_intent", "msg": "Checking for an image request…"}
         intent = detect_image_intent(client, prompt, model=ctx.model)
         if intent.get("image"):
@@ -1029,7 +1191,7 @@ def run_turn_events(
         "stage": "pick",
         "msg": f"Picking relevant skills from {len(skills) - len(system_skills)} options…",
     }
-    chosen_names = pick_skills(client, prompt, skills, model=ctx.model)
+    chosen_names = pick_skills(client, persisted_prompt, skills, model=ctx.model)
     picked = [s for s in skills if s.name in chosen_names]
     active_loaded = [s for s in picked if s.tier == "active"]
     archive_picked = [s for s in picked if s.tier == "archive"]
@@ -1066,10 +1228,11 @@ def run_turn_events(
         model=ctx.model,
         allow_code_execution=allow_code_execution,
         thinking_level=ctx.thinking_level,
+        attachments=attachments,
     )
 
     yield {"stage": "persist", "msg": "Saving turn to session log…"}
-    append_turn(ctx, session_id, "user", prompt)
+    append_turn(ctx, session_id, "user", persisted_prompt)
     append_turn(ctx, session_id, "model", answer, usage=usage)
 
     scoped_for_reflect = system_skills + active_loaded
@@ -1077,7 +1240,7 @@ def run_turn_events(
         yield {"stage": "reflect", "msg": "Reflecting on what to remember…"}
         edits = reflect_and_edit(
             client,
-            prompt,
+            persisted_prompt,
             answer,
             all_skills=skills,
             scoped_skills=scoped_for_reflect,
@@ -1119,12 +1282,14 @@ def run_turn(
     session_id: str,
     prompt: str,
     allow_code_execution: bool = False,
+    attachments: list[Attachment] | None = None,
 ) -> TurnResult:
     """Drains run_turn_events. Kept for CLI compatibility."""
     final: dict | None = None
     for ev in run_turn_events(
         client, ctx, session_id, prompt,
         allow_code_execution=allow_code_execution,
+        attachments=attachments,
     ):
         if ev.get("stage") == "done":
             final = ev
@@ -1183,8 +1348,10 @@ def main() -> None:
     code_exec = _code_exec_enabled()
     print(f"Agent ready ({ctx.model}). User: {user_id}. Session: {session_id}")
     print(f"Code execution: {'on' if code_exec else 'off'} (AGENT_CODE_EXEC)")
-    print("Type prompt. Ctrl-C to exit.\n")
+    print("Type prompt. /attach <path> to add a file (pdf/image/xlsx/csv/text), "
+          "/detach to clear. Ctrl-C to exit.\n")
 
+    attachments: list[Attachment] = []
     while True:
         try:
             prompt = input("you> ").strip()
@@ -1194,9 +1361,36 @@ def main() -> None:
         if not prompt:
             continue
 
+        if prompt.startswith("/attach "):
+            path = prompt[len("/attach "):].strip().strip('"')
+            if len(attachments) >= ATTACH_MAX_FILES:
+                print(f"[attach failed: max {ATTACH_MAX_FILES} files]")
+                continue
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                import mimetypes
+                mime = mimetypes.guess_type(path)[0] or ""
+                attachments.extend(prepare_attachments([{
+                    "name": os.path.basename(path),
+                    "mime": mime,
+                    "data": base64.b64encode(data).decode("ascii"),
+                }]))
+                names = ", ".join(a.name for a in attachments)
+                print(f"[attached: {names} — sent with every turn this "
+                      "session; /detach to clear]")
+            except (OSError, ValueError) as e:
+                print(f"[attach failed: {e}]")
+            continue
+        if prompt == "/detach":
+            attachments = []
+            print("[attachments cleared]")
+            continue
+
         result = run_turn(
             client, ctx, session_id, prompt,
             allow_code_execution=code_exec,
+            attachments=attachments or None,
         )
 
         tier_summary = []
