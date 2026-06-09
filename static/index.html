@@ -277,6 +277,30 @@
   .msg .body.md th { background: var(--surface-2); }
   .msg .body.md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   .msg .body.md img { max-width: 100%; }
+  .msg.gen-image {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .msg.gen-image > a > img {
+    max-width: 100%;
+    max-height: 512px;
+    border-radius: var(--r-card);
+    border: 1px solid var(--border);
+    display: block;
+  }
+  .msg.gen-image .download-btn {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    padding: 5px 14px;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+    font-size: 12px;
+    text-decoration: none;
+  }
+  .msg.gen-image .download-btn:hover { background: var(--surface-3); }
   .badges {
     font-size: 10px;
     color: var(--text-3);
@@ -846,6 +870,34 @@ function appendMessage(role, text, loaded = null, tokens = null, meta = null) {
   $("chat").scrollTop = $("chat").scrollHeight;
 }
 
+// Render a generated image plus a download button. The bytes arrive inline in
+// the stream's final event (data URL) and are NOT stored server-side, so this
+// renders the live result; a reloaded session only shows the image if cheap
+// storage produced a persisted URL (then it's markdown in the answer text).
+function appendImage(img) {
+  const src = `data:${img.mime || "image/png"};base64,${img.b64}`;
+  const ext = ((img.mime || "image/png").split("/")[1] || "png").split("+")[0];
+  const wrap = document.createElement("div");
+  wrap.className = "msg agent gen-image";
+  const a = document.createElement("a");
+  a.href = img.url || src;
+  a.download = `generated-image.${ext}`;
+  a.title = "Download image";
+  const im = document.createElement("img");
+  im.src = src;
+  im.alt = img.prompt || "generated image";
+  a.appendChild(im);
+  const dl = document.createElement("a");
+  dl.href = img.url || src;
+  dl.download = `generated-image.${ext}`;
+  dl.className = "download-btn";
+  dl.textContent = "↓ Download";
+  wrap.appendChild(a);
+  wrap.appendChild(dl);
+  $("chat").appendChild(wrap);
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
 async function refreshSidebar() {
   const [sessions, skills] = await Promise.all([
     api("/api/sessions"),
@@ -1080,6 +1132,7 @@ async function send(message) {
       appendMessage("agent", `[error: ${finalEvent.msg}]`);
     } else if (finalEvent) {
       appendMessage("agent", finalEvent.answer, finalEvent.loaded, finalEvent.tokens, finalEvent.meta);
+      if (finalEvent.image && finalEvent.image.b64) appendImage(finalEvent.image);
       if (finalEvent.edits && finalEvent.edits.length) {
         const note = document.createElement("div");
         note.className = "badges";

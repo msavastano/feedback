@@ -13,6 +13,7 @@ Flow per turn:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -30,6 +31,11 @@ from store import SessionStore, SkillStore, UserStore
 
 MODEL = "gemini-3.5-flash"
 ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
+
+# Image generation runs on a dedicated native-image model, never user-selectable.
+# The user's chat model still drives intent detection; only the pixels come from
+# here. Returns inline image parts (response_modalities = TEXT + IMAGE).
+IMAGE_MODEL = "gemini-3.1-flash-image"
 
 # Per-model thinking level for the main respond() call. Gemini 3 tool use
 # (code execution / search) needs thinking engaged; without a thinking_config
@@ -523,6 +529,144 @@ def respond(
     return _assemble_answer(resp), usage
 
 
+# ---------- image generation ----------
+
+def _image_gen_enabled() -> bool:
+    """Image generation toggle. On by default; set AGENT_IMAGE_GEN=0 to disable
+    (skips the per-turn intent classifier call to conserve quota)."""
+    return os.environ.get("AGENT_IMAGE_GEN", "1").strip().lower() not in (
+        "0", "false", "no", "off", ""
+    )
+
+
+_IMAGE_INTENT_INSTRUCTIONS = (
+    "Decide whether the user is asking you to CREATE / GENERATE / DRAW / PAINT a "
+    "NEW image (picture, illustration, logo, diagram-as-art, etc.). "
+    "Editing or analysing an existing image, or merely discussing images, is NOT "
+    "image generation. "
+    'Return ONLY JSON: {"image": true|false, "prompt": "<standalone, vivid image '
+    'description>"}. When image is false, prompt may be empty.'
+)
+
+
+def detect_image_intent(
+    client: genai.Client, prompt: str, model: str = MODEL
+) -> dict:
+    """Cheap classifier: does the user want a NEW image? Returns
+    {"image": bool, "prompt": str}. Failure-safe — returns image=False on any
+    parse/transport hiccup so a turn never dies in the gate."""
+    resp = _generate(
+        client,
+        model=model,
+        contents=f"User prompt:\n{prompt}\n\nJSON:",
+        config=types.GenerateContentConfig(
+            system_instruction=_IMAGE_INTENT_INSTRUCTIONS,
+            response_mime_type="application/json",
+        ),
+    )
+    _log_usage("image-intent", resp)
+    try:
+        data = json.loads(resp.text or "")
+        if isinstance(data, dict) and data.get("image"):
+            return {"image": True, "prompt": (data.get("prompt") or prompt).strip()}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {"image": False, "prompt": ""}
+
+
+def generate_image(
+    client: genai.Client, image_prompt: str
+) -> tuple[bytes | None, str, str]:
+    """Call the native-image model. Returns (image_bytes|None, mime, caption_text).
+    image_bytes is None when the model declined to emit an image."""
+    resp = _generate(
+        client,
+        model=IMAGE_MODEL,
+        contents=image_prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["TEXT", "IMAGE"],
+        ),
+    )
+    _log_usage("image", resp)
+    cand = (getattr(resp, "candidates", None) or [None])[0]
+    content = getattr(cand, "content", None) if cand else None
+    parts = getattr(content, "parts", None) if content else None
+    data: bytes | None = None
+    mime = "image/png"
+    captions: list[str] = []
+    for part in parts or []:
+        inline = getattr(part, "inline_data", None)
+        if inline is not None and getattr(inline, "data", None):
+            data = inline.data
+            mime = getattr(inline, "mime_type", None) or mime
+        text = getattr(part, "text", None)
+        if text:
+            captions.append(text)
+    return data, mime, "\n\n".join(captions).strip()
+
+
+def _store_image_blob(data: bytes, mime: str) -> str | None:
+    """Best-effort upload to Vercel Blob (the 'cheap storage' path). Returns a
+    public URL or None. Active ONLY when BLOB_READ_WRITE_TOKEN is set; any
+    failure degrades silently to inline-only (image still shown, just not
+    persisted across reloads)."""
+    token = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
+    if not token:
+        return None
+    import urllib.error
+    import urllib.request
+
+    ext = (mime.split("/", 1)[-1] or "png").split("+", 1)[0]
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    pathname = f"generated-images/{stamp}-{secrets.token_hex(4)}.{ext}"
+    try:
+        req = urllib.request.Request(
+            f"https://blob.vercel-storage.com/{pathname}",
+            data=data,
+            method="PUT",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-api-version": "7",
+                "x-content-type": mime,
+                "content-type": mime,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+        return payload.get("url")
+    except (urllib.error.URLError, OSError, ValueError, TypeError) as e:
+        print(f"[blob] upload failed, inline-only: {e}", file=sys.stderr)
+        return None
+
+
+def _remember_image(
+    ctx: UserCtx, skills: list[Skill], image_prompt: str, url: str | None
+) -> str:
+    """Persist the FACT that an image was generated (prompt only — image bytes
+    are never stored in the DB). Appends to an `image-generations` active skill,
+    recording the public URL too when cheap storage produced one."""
+    name = "image-generations"
+    existing = next((s for s in skills if s.name == name), None)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    line = f'- [{stamp}] "{image_prompt}"'
+    if url:
+        line += f" → {url}"
+    if existing:
+        body = existing.body.rstrip() + "\n" + line
+        desc = existing.description
+        op = "update"
+    else:
+        body = (
+            "Images the user has asked me to generate. Prompts are kept here; "
+            "the image bytes themselves are not stored unless cheap object "
+            "storage is configured (then a URL is recorded).\n\n" + line
+        )
+        desc = "Log of images generated for the user, with their prompts."
+        op = "create"
+    write_skill(ctx, name, desc, body, tier="active")
+    return f"{op}[active] -> {name}"
+
+
 EDIT_INSTRUCTIONS = """\
 You are a memory writer. Aggressively persist anything from the exchange that could
 inform FUTURE conversations. Skills are markdown docs stored with a YAML
@@ -796,6 +940,7 @@ class TurnResult:
     loaded_archive: list[str]
     edits_applied: list[str]
     tokens: dict
+    image: dict | None = None
 
 
 def run_turn_events(
@@ -813,6 +958,72 @@ def run_turn_events(
     yield {"stage": "load", "msg": "Reading skill catalog…"}
     skills = load_skills(ctx)
     system_skills = [s for s in skills if s.tier == "system"]
+
+    # Image-generation fast path: if the user is asking for a NEW picture, route
+    # to the native-image model and return early — no skill picking / respond /
+    # reflect. The image rides in the final `done` event (and a live `image`
+    # event) but is NOT written to the turns table; only a prompt note persists.
+    if _image_gen_enabled():
+        yield {"stage": "image_intent", "msg": "Checking for an image request…"}
+        intent = detect_image_intent(client, prompt, model=ctx.model)
+        if intent.get("image"):
+            img_prompt = intent.get("prompt") or prompt
+            yield {"stage": "image_gen", "msg": "Generating image…"}
+            data, mime, caption = generate_image(client, img_prompt)
+            loaded_summary = {
+                "system": [s.name for s in system_skills],
+                "active": [],
+                "archive": [],
+            }
+            if not data:
+                answer = caption or (
+                    "I couldn't generate an image for that prompt — the model "
+                    "returned no image. Try rephrasing."
+                )
+                append_turn(ctx, session_id, "user", prompt)
+                append_turn(ctx, session_id, "model", answer)
+                yield {
+                    "stage": "done",
+                    "answer": answer,
+                    "loaded": loaded_summary,
+                    "edits": [],
+                    "tokens": {},
+                    "meta": {},
+                }
+                return
+
+            url = _store_image_blob(data, mime)
+            answer = caption or f'Here is the image you asked for: "{img_prompt}".'
+            # Persist text only. With cheap storage, embed the URL as markdown so
+            # the image reappears on reload; otherwise the bytes are transient.
+            persisted = f"{answer}\n\n![generated image]({url})" if url else answer
+            append_turn(ctx, session_id, "user", prompt)
+            append_turn(ctx, session_id, "model", persisted)
+
+            edits = [_remember_image(ctx, skills, img_prompt, url)]
+            loaded_summary["active"] = ["image-generations"]
+
+            image_payload = {
+                "b64": base64.b64encode(data).decode("ascii"),
+                "mime": mime,
+                "prompt": img_prompt,
+                "url": url,
+            }
+            yield {
+                "stage": "image",
+                "msg": "Image ready.",
+                "image": image_payload,
+            }
+            yield {
+                "stage": "done",
+                "answer": answer,
+                "image": image_payload,
+                "loaded": loaded_summary,
+                "edits": edits,
+                "tokens": {},
+                "meta": {},
+            }
+            return
 
     yield {
         "stage": "pick",
@@ -926,6 +1137,7 @@ def run_turn(
         loaded_archive=final["loaded"]["archive"],
         edits_applied=final["edits"],
         tokens=final["tokens"],
+        image=final.get("image"),
     )
 
 
@@ -997,6 +1209,17 @@ def main() -> None:
         print(f"[loaded {' | '.join(tier_summary) if tier_summary else 'nothing'}]")
 
         print(f"\nagent> {result.answer}\n")
+
+        if result.image and result.image.get("b64"):
+            ext = (result.image.get("mime", "image/png").split("/")[-1]
+                   or "png").split("+")[0]
+            fname = f"generated-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{ext}"
+            with open(fname, "wb") as f:
+                f.write(base64.b64decode(result.image["b64"]))
+            print(f"[image saved: {os.path.abspath(fname)}]")
+            if result.image.get("url"):
+                print(f"[image url: {result.image['url']}]")
+            print()
 
         if result.edits_applied:
             print(f"[memory: {'; '.join(result.edits_applied)}]\n")

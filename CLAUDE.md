@@ -43,6 +43,18 @@ $env:AGENT_CODE_EXEC = "0"   # disable
 # Override the per-model thinking level for respond() (minimal|low|medium|high,
 # case-insensitive). Invalid/unset => per-model THINKING_LEVELS default.
 $env:AGENT_THINKING_LEVEL = "high"
+
+# Image generation (native-image model IMAGE_MODEL = gemini-3.1-flash-image).
+# On by default; a cheap per-turn classifier (detect_image_intent) routes
+# "draw/generate an image" prompts to the image model. Disable to skip the
+# classifier call and save one Gemini request/turn.
+$env:AGENT_IMAGE_GEN = "0"   # disable
+
+# Cheap-storage opt-in for generated images. Unset => images are shown/downloaded
+# live but NOT persisted (only the prompt is remembered in the image-generations
+# skill). Set to a Vercel Blob RW token => images are uploaded and the URL is
+# saved, so they reappear on session reload.
+$env:BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_..."
 ```
 
 No test suite, no linter config. Manual testing via CLI or `/api/chat`.
@@ -72,6 +84,10 @@ Skills are markdown files with YAML frontmatter (`name`, `description`). Tier ==
 7. **apply** — `apply_edits()` writes files. `_strip_leading_frontmatter()` defends against the model embedding a YAML block inside `body`.
 
 `run_turn_events` is a generator yielding `{stage, msg, ...}` dicts; the server streams these as NDJSON. `run_turn` drains it for CLI.
+
+### Image generation fast-path
+
+Before step 2, `run_turn_events` runs `detect_image_intent()` (cheap classifier on the user's chat model). On a hit it routes to `generate_image()` (model `IMAGE_MODEL` = `gemini-3.1-flash-image`, `response_modalities=[TEXT, IMAGE]`) and **returns early** — no pick/archive/respond/reflect. The image bytes ride in the final `done` event (base64) for live display + download; they are **never written to the turns table**. Only a prompt note is persisted via `_remember_image()` into an `image-generations` active skill. `_store_image_blob()` is the opt-in "cheap storage" path (Vercel Blob, gated on `BLOB_READ_WRITE_TOKEN`): when present the image URL is uploaded, embedded in the saved turn as markdown, and logged in the skill so it survives reload. Toggle the whole feature with `AGENT_IMAGE_GEN`.
 
 ### Session lifecycle
 
