@@ -483,6 +483,56 @@
     font-family: var(--font-mono);
   }
 
+  /* attachment hover preview */
+  #attachPop {
+    position: fixed;
+    display: none;
+    z-index: 20;
+    max-width: 320px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    padding: 10px 12px;
+    box-shadow: var(--shadow);
+  }
+  #attachPop.show { display: block; }
+  #attachPop .pop-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 296px;
+  }
+  #attachPop img {
+    display: block;
+    max-width: 296px;
+    max-height: 220px;
+    object-fit: contain;
+    border-radius: 4px;
+  }
+  #attachPop embed {
+    display: block;
+    width: 296px;
+    height: 360px;
+    border: none;
+    border-radius: 4px;
+  }
+  #attachPop pre {
+    font-size: 11px;
+    color: var(--text-2);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    max-width: 296px;
+    max-height: 220px;
+    overflow: hidden;
+    font-family: var(--font-mono);
+  }
+  #attachPop .pop-none { font-size: 11px; color: var(--text-mute); }
+
   /* confirm modal */
   #confirm {
     position: fixed;
@@ -720,6 +770,7 @@
 </div>
 
 <div id="skillPop"></div>
+<div id="attachPop"></div>
 <div id="confirm">
   <div class="card">
     <div class="msg" id="confirmMsg"></div>
@@ -1129,17 +1180,111 @@ function renderAttachBar() {
       `<span class="fsize">${fmtSize(a.size)}</span>` +
       `<button type="button" title="Remove">×</button>`;
     chip.querySelector("button").onclick = () => {
+      hideAttachPop();
+      _revokeAttachUrl(sessionAttachments[i]);
       sessionAttachments.splice(i, 1);
       renderAttachBar();
     };
+    chip.addEventListener("mouseenter", () => showAttachPop(chip, a));
+    chip.addEventListener("mouseleave", scheduleHideAttachPop);
     bar.appendChild(chip);
   }
   bar.classList.toggle("show", sessionAttachments.length > 0);
 }
 
 function clearAttachments() {
+  hideAttachPop();
+  sessionAttachments.forEach(_revokeAttachUrl);
   sessionAttachments = [];
   renderAttachBar();
+}
+
+// ---------- attachment hover preview ----------
+// Thumbnail popover over a chip: images inline, PDFs via the browser's native
+// viewer (blob URL in <embed>), text-ish files as a snippet. Blob URLs are
+// cached per attachment and revoked on remove/clear.
+let attachPopHideTimer = null;
+
+function _attachBlobUrl(a) {
+  if (!a._url) {
+    const bytes = Uint8Array.from(atob(a.data), (c) => c.charCodeAt(0));
+    a._url = URL.createObjectURL(new Blob([bytes], { type: a.mime }));
+  }
+  return a._url;
+}
+
+function _revokeAttachUrl(a) {
+  if (a && a._url) {
+    URL.revokeObjectURL(a._url);
+    delete a._url;
+  }
+}
+
+function _attachTextSnippet(a, maxChars = 1200) {
+  const bytes = Uint8Array.from(atob(a.data), (c) => c.charCodeAt(0));
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  return text.length > maxChars ? text.slice(0, maxChars) + "…" : text;
+}
+
+function _isTextMime(mime) {
+  return /^text\//.test(mime) ||
+    ["application/json", "application/xml", "application/yaml",
+     "application/x-yaml"].includes(mime);
+}
+
+function showAttachPop(chip, a) {
+  clearTimeout(attachPopHideTimer);
+  const pop = $("attachPop");
+  pop.innerHTML = `<div class="pop-name">${escapeHtml(a.name)}</div>`;
+  if (a.mime.startsWith("image/")) {
+    const im = document.createElement("img");
+    im.alt = a.name;
+    im.onload = () => positionAttachPop(chip, pop);
+    im.src = `data:${a.mime};base64,${a.data}`;
+    pop.appendChild(im);
+  } else if (a.mime === "application/pdf") {
+    const em = document.createElement("embed");
+    em.type = "application/pdf";
+    // #toolbar=0 hides the viewer chrome where supported (Chromium).
+    em.src = `${_attachBlobUrl(a)}#toolbar=0&navpanes=0&scrollbar=0`;
+    pop.appendChild(em);
+  } else if (_isTextMime(a.mime)) {
+    const pre = document.createElement("pre");
+    try {
+      pre.textContent = _attachTextSnippet(a);
+    } catch {
+      pre.textContent = "(could not decode preview)";
+    }
+    pop.appendChild(pre);
+  } else {
+    const none = document.createElement("div");
+    none.className = "pop-none";
+    none.textContent = `No preview (${a.mime || "unknown type"}, ${fmtSize(a.size)})`;
+    pop.appendChild(none);
+  }
+  pop.classList.add("show");
+  positionAttachPop(chip, pop);
+}
+
+function positionAttachPop(chip, pop) {
+  const r = chip.getBoundingClientRect();
+  // Chips sit at the bottom (composer), so prefer opening upward.
+  const left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8);
+  pop.style.left = `${Math.max(8, left)}px`;
+  let top = r.top - pop.offsetHeight - 8;
+  if (top < 8) top = Math.min(r.bottom + 8, window.innerHeight - pop.offsetHeight - 8);
+  pop.style.top = `${Math.max(8, top)}px`;
+}
+
+function scheduleHideAttachPop() {
+  clearTimeout(attachPopHideTimer);
+  attachPopHideTimer = setTimeout(hideAttachPop, 150);
+}
+
+function hideAttachPop() {
+  clearTimeout(attachPopHideTimer);
+  $("attachPop").classList.remove("show");
+  $("attachPop").innerHTML = "";
 }
 
 $("attachBtn").onclick = () => $("fileInput").click();
@@ -1496,6 +1641,8 @@ for (const btn of document.querySelectorAll(".section-toggle")) {
 }
 
 initSkillPop();
+$("attachPop").addEventListener("mouseenter", () => clearTimeout(attachPopHideTimer));
+$("attachPop").addEventListener("mouseleave", scheduleHideAttachPop);
 
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
