@@ -96,13 +96,15 @@ validates (5 files, 8MB each, 16MB total), `attachment_parts()` turns them into
 Gemini parts — PDF/image as native bytes, text inline, .xlsx converted to CSV
 text via openpyxl (capped at `ATTACH_SHEET_ROW_CAP` rows/sheet). Only a
 `[attached: name (mime, size)]` marker line is appended to the persisted user
-turn, so reflect/session-summary still record what was discussed. Attachment
-turns skip the image-generation fast path. CLI: `/attach <path>` adds a file
+turn, so reflect/session-summary still record what was discussed. Turns with
+any non-image attachment (pdf, text, spreadsheet) skip the image-generation
+fast path; image-only attachments stay eligible and ride into `generate_image()`
+as reference inputs (image-to-image). CLI: `/attach <path>` adds a file
 (re-sent each turn), `/detach` clears.
 
 ### Image generation fast-path
 
-Before step 2, `run_turn_events` runs `detect_image_intent()` (cheap classifier on the user's chat model). On a hit it routes to `generate_image()` (model `IMAGE_MODEL` = `gemini-3.1-flash-image`, `response_modalities=[TEXT, IMAGE]`) and **returns early** — no pick/archive/respond/reflect. The image bytes ride in the final `done` event (base64) for live display + download; they are **never written to the turns table**. Only a prompt note is persisted via `_remember_image()` into an `image-generations` active skill. `_store_image_blob()` is the opt-in "cheap storage" path (Vercel Blob, gated on `BLOB_READ_WRITE_TOKEN`): when present the image URL is uploaded, embedded in the saved turn as markdown, and logged in the skill so it survives reload. Toggle the whole feature with `AGENT_IMAGE_GEN`.
+Before step 2, `run_turn_events` runs `detect_image_intent()` (cheap classifier on the user's chat model; a reference-image variant of the instructions is used when image attachments are present, so "redraw me as X" over an upload counts as generation). On a hit it routes to `generate_image()` (model `IMAGE_MODEL` = `gemini-3.1-flash-image`, `response_modalities=[TEXT, IMAGE]`; attached images are passed as input parts for image-to-image) and **returns early** — no pick/archive/respond/reflect. The image bytes ride in the final `done` event (base64) for live display + download; they are **never written to the turns table**. Only a prompt note is persisted via `_remember_image()` into an `image-generations` active skill. `_store_image_blob()` is the opt-in "cheap storage" path (Vercel Blob, gated on `BLOB_READ_WRITE_TOKEN`): when present the image URL is uploaded, embedded in the saved turn as markdown, and logged in the skill so it survives reload. Toggle the whole feature with `AGENT_IMAGE_GEN`.
 
 ### Session lifecycle
 

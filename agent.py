@@ -698,9 +698,23 @@ _IMAGE_INTENT_INSTRUCTIONS = (
     'description>"}. When image is false, prompt may be empty.'
 )
 
+_IMAGE_INTENT_INSTRUCTIONS_WITH_REFS = (
+    "The user has attached reference image(s) to this message. Decide whether "
+    "they are asking you to CREATE / GENERATE a NEW image FROM or BASED ON those "
+    "reference image(s) — e.g. restyle, transform, reimagine, redraw the subject "
+    "in a different style or setting. That IS image generation. "
+    "Merely analysing, describing, or answering questions about the attached "
+    "image(s) is NOT image generation. "
+    'Return ONLY JSON: {"image": true|false, "prompt": "<standalone instruction '
+    "for an image model that will also receive the reference image(s); describe "
+    'the transformation, do not re-describe the reference content>"}. '
+    "When image is false, prompt may be empty."
+)
+
 
 def detect_image_intent(
-    client: genai.Client, prompt: str, model: str = MODEL
+    client: genai.Client, prompt: str, model: str = MODEL,
+    has_reference_images: bool = False,
 ) -> dict:
     """Cheap classifier: does the user want a NEW image? Returns
     {"image": bool, "prompt": str}. Failure-safe — returns image=False on any
@@ -710,7 +724,11 @@ def detect_image_intent(
         model=model,
         contents=f"User prompt:\n{prompt}\n\nJSON:",
         config=types.GenerateContentConfig(
-            system_instruction=_IMAGE_INTENT_INSTRUCTIONS,
+            system_instruction=(
+                _IMAGE_INTENT_INSTRUCTIONS_WITH_REFS
+                if has_reference_images
+                else _IMAGE_INTENT_INSTRUCTIONS
+            ),
             response_mime_type="application/json",
         ),
     )
@@ -725,14 +743,22 @@ def detect_image_intent(
 
 
 def generate_image(
-    client: genai.Client, image_prompt: str
+    client: genai.Client, image_prompt: str,
+    reference_images: list[Attachment] | None = None,
 ) -> tuple[bytes | None, str, str]:
     """Call the native-image model. Returns (image_bytes|None, mime, caption_text).
-    image_bytes is None when the model declined to emit an image."""
+    image_bytes is None when the model declined to emit an image.
+    `reference_images` (image attachments) ride along as input parts for
+    image-to-image generation."""
+    contents: str | list[types.Part] = image_prompt
+    if reference_images:
+        contents = attachment_parts(reference_images) + [
+            types.Part(text=image_prompt)
+        ]
     resp = _generate(
         client,
         model=IMAGE_MODEL,
-        contents=image_prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
         ),
@@ -1123,15 +1149,25 @@ def run_turn_events(
     # to the native-image model and return early — no skill picking / respond /
     # reflect. The image rides in the final `done` event (and a live `image`
     # event) but is NOT written to the turns table; only a prompt note persists.
-    # Skipped when files are attached — those turns are about analysing the
-    # uploads, not generating art.
-    if _image_gen_enabled() and not attachments:
+    # Image-only attachments stay eligible: they become reference inputs for
+    # image-to-image ("redraw me as X"). Any non-image attachment (pdf, text,
+    # spreadsheet) skips the path — those turns are about analysing the uploads.
+    image_refs = [
+        a for a in (attachments or []) if a.mime.startswith("image/")
+    ]
+    images_only = len(image_refs) == len(attachments or [])
+    if _image_gen_enabled() and images_only:
         yield {"stage": "image_intent", "msg": "Checking for an image request…"}
-        intent = detect_image_intent(client, prompt, model=ctx.model)
+        intent = detect_image_intent(
+            client, prompt, model=ctx.model,
+            has_reference_images=bool(image_refs),
+        )
         if intent.get("image"):
             img_prompt = intent.get("prompt") or prompt
             yield {"stage": "image_gen", "msg": "Generating image…"}
-            data, mime, caption = generate_image(client, img_prompt)
+            data, mime, caption = generate_image(
+                client, img_prompt, reference_images=image_refs or None
+            )
             loaded_summary = {
                 "system": [s.name for s in system_skills],
                 "active": [],
@@ -1142,7 +1178,7 @@ def run_turn_events(
                     "I couldn't generate an image for that prompt — the model "
                     "returned no image. Try rephrasing."
                 )
-                append_turn(ctx, session_id, "user", prompt)
+                append_turn(ctx, session_id, "user", persisted_prompt)
                 append_turn(ctx, session_id, "model", answer)
                 yield {
                     "stage": "done",
@@ -1159,7 +1195,7 @@ def run_turn_events(
             # Persist text only. With cheap storage, embed the URL as markdown so
             # the image reappears on reload; otherwise the bytes are transient.
             persisted = f"{answer}\n\n![generated image]({url})" if url else answer
-            append_turn(ctx, session_id, "user", prompt)
+            append_turn(ctx, session_id, "user", persisted_prompt)
             append_turn(ctx, session_id, "model", persisted)
 
             edits = [_remember_image(ctx, skills, img_prompt, url)]
