@@ -810,7 +810,6 @@
         <select id="modelSelect" title="Select model"></select>
         <select id="thinkingSelect" title="Thinking level"></select>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
-        <button id="endSession">End session</button>
         <button id="logout">Logout</button>
       </div>
     </header>
@@ -1659,37 +1658,33 @@ $("input").addEventListener("keydown", (e) => {
   }
 });
 
-$("newSession").onclick = () => {
-  flushSessionBeacon();
-  sessionId = null;
-  turnsThisSession = 0;
-  clearAttachments();
-  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
-  $("chat").innerHTML = "";
-  closeSidebar();
-};
-
-$("endSession").onclick = async () => {
-  if (!sessionId) return;
-  const btn = $("endSession");
-  btn.disabled = true;
-  const busy = showBusy("Ending session — summarizing to memory…");
-  let res;
-  try {
-    res = await api("/api/session/end", {
-      method: "POST",
-      body: JSON.stringify({ session_id: sessionId }),
-    });
-  } finally {
-    busy.remove();
-    btn.disabled = false;
+$("newSession").onclick = async () => {
+  // Summarize the current session to memory before starting fresh. Awaited (not
+  // a best-effort beacon) so a persisted-but-unacked turn still gets saved, and
+  // guarded only by `sessionId` — the server is idempotent and no-ops a session
+  // with <2 turns. Best-effort: a failure here must not block the new chat.
+  if (sessionId) {
+    const btn = $("newSession");
+    btn.disabled = true;
+    const busy = showBusy("Summarizing session to memory…");
+    try {
+      await api("/api/session/end", {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+    } catch (e) {
+      // best-effort — still start the new chat
+    } finally {
+      busy.remove();
+      btn.disabled = false;
+    }
   }
   sessionId = null;
   turnsThisSession = 0;
   clearAttachments();
   try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   $("chat").innerHTML = "";
-  if (res && res.saved) appendMessage("agent", `[session summarized → ${res.saved}]`);
+  closeSidebar();
   refreshSidebar();
 };
 
