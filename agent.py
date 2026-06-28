@@ -1021,8 +1021,13 @@ def summarize_session_to_skill(
     try:
         data = json.loads(raw)
         if data.get("description") and data.get("body"):
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            name = f"session-{stamp}"
+            # Reuse the prior skill name when re-summarizing a returned-to chat,
+            # so the updated summary overwrites it instead of leaving a stale
+            # duplicate. Fresh sessions get a new timestamped name.
+            name = SessionStore.rollup_skill(ctx.user_id, session_id)
+            if not name:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                name = f"session-{stamp}"
             write_skill(ctx, name, data["description"], data["body"], tier="active")
             SessionStore.mark_rolled_up(ctx.user_id, session_id, name)
             return name

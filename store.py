@@ -231,12 +231,18 @@ class SessionStore:
         with get_pool().connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
-                    # Ensure session row exists (cheap; ON CONFLICT no-op).
+                    # Ensure session row exists. A new turn invalidates any
+                    # prior rollup: the session's captured-in-memory snapshot is
+                    # now stale, so clear rolled_up. This lets a returned-to chat
+                    # be re-summarized on the next end. (No-op on a fresh session
+                    # where rolled_up is already FALSE.)
                     cur.execute(
                         """
                         INSERT INTO sessions (user_id, session_id)
                         VALUES (%s, %s)
-                        ON CONFLICT (user_id, session_id) DO NOTHING
+                        ON CONFLICT (user_id, session_id)
+                        DO UPDATE SET rolled_up = FALSE
+                        WHERE sessions.rolled_up
                         """,
                         (user_id, session_id),
                     )
@@ -344,6 +350,22 @@ class SessionStore:
                 )
                 row = cur.fetchone()
                 return bool(row and row[0])
+
+    @staticmethod
+    def rollup_skill(user_id: str, session_id: str) -> str | None:
+        """Name of the skill this session was last rolled up into, or None.
+        Lets a re-summarize overwrite the same skill instead of minting a dupe."""
+        _check_user_id(user_id)
+        _check_session_id(session_id)
+        with get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rollup_skill FROM sessions "
+                    "WHERE user_id = %s AND session_id = %s",
+                    (user_id, session_id),
+                )
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
 
     @staticmethod
     def mark_rolled_up(user_id: str, session_id: str, skill_name: str) -> None:
