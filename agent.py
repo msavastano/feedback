@@ -44,7 +44,7 @@ def provider_of(model: str) -> str:
 # Image generation runs on a dedicated native-image model, never user-selectable.
 # The user's chat model still drives intent detection; only the pixels come from
 # here. Returns inline image parts (response_modalities = TEXT + IMAGE).
-IMAGE_MODEL = "gemini-3.1-flash-image"
+IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 
 # Per-model thinking level for the main respond() call. Gemini 3 tool use
 # (code execution / search) needs thinking engaged; without a thinking_config
