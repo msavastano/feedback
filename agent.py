@@ -24,13 +24,22 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import anthropic
 from google import genai
 from google.genai import errors, types
 
 from store import SessionStore, SkillStore, UserStore
 
 MODEL = "gemini-3.5-flash"
-ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
+# Claude Haiku 4.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
+# web search only — no image generation, no code execution, no thinking config.
+CLAUDE_MODEL = "claude-haiku-4-5"
+ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite", CLAUDE_MODEL)
+
+
+def provider_of(model: str) -> str:
+    """Route a chat model to its SDK provider. Claude ids start with 'claude'."""
+    return "anthropic" if (model or "").startswith("claude") else "gemini"
 
 # Image generation runs on a dedicated native-image model, never user-selectable.
 # The user's chat model still drives intent detection; only the pixels come from
@@ -272,6 +281,26 @@ def _client(api_key: str | None = None) -> genai.Client:
     return genai.Client()
 
 
+def _anthropic_client(api_key: str | None = None) -> anthropic.Anthropic:
+    """Build an Anthropic client. Mirrors `_client`: web deploy passes the user's
+    own key (held only in their browser session); CLI passes None and the SDK
+    falls back to ANTHROPIC_API_KEY from the environment. The SDK retries
+    429/5xx automatically (max_retries default 2), so the Claude path needs no
+    hand-rolled backoff."""
+    if api_key:
+        return anthropic.Anthropic(api_key=api_key)
+    return anthropic.Anthropic()
+
+
+@dataclass
+class Clients:
+    """Holder so both SDKs can coexist. Image generation always needs Gemini;
+    chat may route to either. Either may be None — a Claude-only web user has no
+    Gemini client, and supplies no Gemini key."""
+    gemini: "genai.Client | None" = None
+    anthropic: "anthropic.Anthropic | None" = None
+
+
 # Free-tier keys hit per-minute quotas easily: a single turn fires several
 # Gemini calls (pick → archive → respond → reflect). Back off and retry on 429
 # instead of letting the whole turn die.
@@ -333,8 +362,197 @@ def _log_usage(label: str, resp) -> dict:
     return u
 
 
+def _anthropic_usage_dict(resp) -> dict:
+    """Map an Anthropic Message's usage to the same shape as `_usage_dict`.
+    Anthropic has no 'thoughts' token field; total = in + out."""
+    u = getattr(resp, "usage", None)
+    if not u:
+        return {}
+    inp = getattr(u, "input_tokens", 0) or 0
+    out = getattr(u, "output_tokens", 0) or 0
+    return {"in": inp, "out": out, "thoughts": 0, "total": inp + out}
+
+
+def _log_anthropic_usage(label: str, resp) -> dict:
+    u = _anthropic_usage_dict(resp)
+    if not u:
+        return {}
+    print(f"[tokens {label}] in={u['in']} out={u['out']} total={u['total']}")
+    return u
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _extract_json(text: str):
+    """Tolerantly pull a JSON value out of model text. Handles ```json fences and
+    leading/trailing prose by falling back to the first balanced {...} or [...].
+    Returns the parsed object, or None on failure. Used on the Claude path, which
+    we don't assume emits bare structured output."""
+    if not text:
+        return None
+    raw = text.strip()
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    m = _JSON_FENCE_RE.search(raw)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Fall back to the first balanced object/array in the text.
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = raw.find(opener)
+        if start == -1:
+            continue
+        depth = 0
+        for i in range(start, len(raw)):
+            c = raw[i]
+            if c == opener:
+                depth += 1
+            elif c == closer:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[start : i + 1])
+                    except (json.JSONDecodeError, TypeError):
+                        break
+    return None
+
+
+# Per-call max output tokens for the Claude path. Chat answers are short; this
+# keeps non-streaming requests well under the SDK's HTTP timeout guard.
+CLAUDE_MAX_TOKENS = 8192
+# Server-side web-search tool for Haiku 4.5. The newer _20260209 (dynamic
+# filtering) variant requires Opus 4.6+/Sonnet 4.6 and 400s on Haiku.
+CLAUDE_WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
+
+
+def _chat_json(
+    clients: Clients, model: str, system: str, user: str, label: str
+):
+    """Provider-agnostic 'return JSON' call. Returns (parsed_obj_or_None, usage).
+    Gemini uses response_mime_type=application/json + json.loads; Claude uses a
+    plain message + _extract_json (fence/balance-tolerant)."""
+    if provider_of(model) == "anthropic":
+        resp = clients.anthropic.messages.create(
+            model=model,
+            max_tokens=CLAUDE_MAX_TOKENS,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        usage = _log_anthropic_usage(label, resp)
+        text = "".join(
+            b.text for b in resp.content if getattr(b, "type", None) == "text"
+        )
+        return _extract_json(text), usage
+    resp = _generate(
+        clients.gemini,
+        model=model,
+        contents=user,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            response_mime_type="application/json",
+        ),
+    )
+    usage = _log_usage(label, resp)
+    try:
+        return json.loads(resp.text), usage
+    except (json.JSONDecodeError, TypeError):
+        return None, usage
+
+
+def _chat_respond(
+    clients: Clients,
+    model: str,
+    sys_prompt: str,
+    history: list,
+    prompt: str,
+    attachments: list,
+    allow_code: bool,
+    allow_search: bool,
+    thinking_level: str | None,
+    label: str,
+) -> tuple[str, dict]:
+    """Provider-agnostic main answer. Builds the per-provider SDK call from a
+    prompt that `respond` already assembled. Returns (text, usage)."""
+    if provider_of(model) == "anthropic":
+        # v1 Claude path: web search (server-side) when allowed; no code
+        # execution and no thinking/effort config (Haiku supports neither —
+        # `effort` errors, adaptive thinking is unavailable, so thinking_level
+        # is ignored here).
+        user_content = attachment_blocks(attachments or []) + [
+            {"type": "text", "text": prompt}
+        ]
+        messages = _history_to_claude(history) + [
+            {"role": "user", "content": user_content}
+        ]
+        tools = [CLAUDE_WEB_SEARCH_TOOL] if allow_search else []
+        resp = None
+        for _ in range(6):  # bound pause_turn continuations
+            kwargs = dict(
+                model=model,
+                max_tokens=CLAUDE_MAX_TOKENS,
+                system=sys_prompt,
+                messages=messages,
+            )
+            if tools:
+                kwargs["tools"] = tools
+            resp = clients.anthropic.messages.create(**kwargs)
+            if getattr(resp, "stop_reason", None) != "pause_turn":
+                break
+            # Server tool hit its iteration cap; re-send to resume. Do NOT add a
+            # "continue" message — the trailing server_tool_use signals resume.
+            messages = messages + [
+                {"role": "assistant", "content": resp.content}
+            ]
+        usage = _log_anthropic_usage(label, resp)
+        text = "\n\n".join(
+            b.text
+            for b in (resp.content or [])
+            if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+        ).strip()
+        return text, usage
+
+    tools = [types.Tool(google_search=types.GoogleSearch())]
+    if allow_code:
+        tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
+    user_parts = attachment_parts(attachments or []) + [types.Part(text=prompt)]
+    contents = history + [types.Content(role="user", parts=user_parts)]
+    resp = _generate(
+        clients.gemini,
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=sys_prompt,
+            tools=tools,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=resolve_thinking_level(model, thinking_level)
+            ),
+        ),
+    )
+    if os.environ.get("AGENT_DEBUG"):
+        cand = (getattr(resp, "candidates", None) or [None])[0]
+        parts = getattr(getattr(cand, "content", None), "parts", None) or []
+        kinds = [
+            attr
+            for p in parts
+            for attr in (
+                "text", "executable_code", "code_execution_result",
+                "function_call",
+            )
+            if getattr(p, attr, None)
+        ]
+        ran_code = "executable_code" in kinds
+        print(f"[respond parts] {kinds} code_executed={ran_code}")
+    usage = _log_usage(label, resp)
+    return _assemble_answer(resp), usage
+
+
 def pick_skills(
-    client: genai.Client,
+    clients: Clients,
     prompt: str,
     skills: list[Skill],
     model: str = MODEL,
@@ -352,28 +570,15 @@ def pick_skills(
         "Empty array if none apply."
     )
     user = f"Catalog:\n{catalog}\n\nUser prompt:\n{prompt}\n\nJSON array:"
-    resp = _generate(
-        client,
-        model=model,
-        contents=user,
-        config=types.GenerateContentConfig(
-            system_instruction=sys_prompt,
-            response_mime_type="application/json",
-        ),
-    )
-    _log_usage("pick", resp)
-    try:
-        names = json.loads(resp.text)
-        if not isinstance(names, list):
-            return []
-        valid = {s.name for s in candidates}
-        return [n for n in names if n in valid]
-    except (json.JSONDecodeError, TypeError):
+    names, _ = _chat_json(clients, model, sys_prompt, user, "pick")
+    if not isinstance(names, list):
         return []
+    valid = {s.name for s in candidates}
+    return [n for n in names if n in valid]
 
 
 def pick_archive_sections(
-    client: genai.Client, prompt: str, skill: Skill, model: str = MODEL
+    clients: Clients, prompt: str, skill: Skill, model: str = MODEL
 ) -> str:
     """For archive-tier skill: return only relevant ## sections."""
     sections = split_sections(skill.body)
@@ -388,28 +593,15 @@ def pick_archive_sections(
         f"Skill: {skill.name}\nDescription: {skill.description}\n"
         f"Sections:\n{headings}\n\nPrompt:\n{prompt}\n\nJSON array of indices:"
     )
-    resp = _generate(
-        client,
-        model=model,
-        contents=user,
-        config=types.GenerateContentConfig(
-            system_instruction=sys_prompt,
-            response_mime_type="application/json",
-        ),
-    )
-    _log_usage(f"archive:{skill.name}", resp)
-    try:
-        idxs = json.loads(resp.text)
-        if not isinstance(idxs, list):
-            return ""
-        chunks = [
-            sections[i][1]
-            for i in idxs
-            if isinstance(i, int) and 0 <= i < len(sections)
-        ]
-        return "\n\n".join(chunks)
-    except (json.JSONDecodeError, TypeError):
+    idxs, _ = _chat_json(clients, model, sys_prompt, user, f"archive:{skill.name}")
+    if not isinstance(idxs, list):
         return ""
+    chunks = [
+        sections[i][1]
+        for i in idxs
+        if isinstance(i, int) and 0 <= i < len(sections)
+    ]
+    return "\n\n".join(chunks)
 
 
 def _assemble_answer(resp) -> str:
@@ -454,7 +646,7 @@ def _assemble_answer(resp) -> str:
 
 
 def respond(
-    client: genai.Client,
+    clients: Clients,
     prompt: str,
     system_skills: list[Skill],
     active_loaded: list[Skill],
@@ -465,8 +657,15 @@ def respond(
     thinking_level: str | None = None,
     attachments: list[Attachment] | None = None,
 ) -> tuple[str, dict]:
-    """Main answer. Has google_search grounding (and optional code execution).
-    Attachments ride as extra parts on the user message. Returns (text, usage)."""
+    """Main answer. Has web-search grounding (Gemini google_search / Anthropic
+    server-side web_search) and, on Gemini, optional code execution. Attachments
+    ride as extra parts/blocks on the user message. Returns (text, usage).
+
+    Prompt-building lives here; the per-provider SDK call is delegated to
+    `_chat_respond`. Code execution is Gemini-only in v1 — `allow_code_execution`
+    is ignored on the Claude path."""
+    is_anthropic = provider_of(model) == "anthropic"
+    allow_code = allow_code_execution and not is_anthropic
     sys_block = "\n\n".join(
         f"## [system] {s.name}\n{s.body.strip()}" for s in system_skills
     )
@@ -482,13 +681,14 @@ def respond(
     loaded_text = "\n\n".join(
         b for b in (sys_block, active_block, archive_block) if b
     )
+    search_tool = "web_search" if is_anthropic else "google_search"
     sys_prompt = (
         "You are a helpful agent with a skill-memory system. "
         "Use the loaded skills below as long-term memory. "
-        "Use google_search when current information is needed.\n\n"
+        f"Use {search_tool} when current information is needed.\n\n"
         f"LOADED SKILLS:\n{loaded_text or '(none)'}"
     )
-    if allow_code_execution:
+    if allow_code:
         sys_prompt += (
             "\n\nYou may run Python via the code execution tool for "
             "calculation, data manipulation, or anything better solved by "
@@ -500,39 +700,18 @@ def respond(
             "or spreadsheet data). They are included with the message — read "
             "them and answer based on their actual content."
         )
-    tools = [types.Tool(google_search=types.GoogleSearch())]
-    if allow_code_execution:
-        tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
-    user_parts = attachment_parts(attachments or []) + [types.Part(text=prompt)]
-    contents = history + [types.Content(role="user", parts=user_parts)]
-    resp = _generate(
-        client,
-        model=model,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=sys_prompt,
-            tools=tools,
-            thinking_config=types.ThinkingConfig(
-                thinking_level=resolve_thinking_level(model, thinking_level)
-            ),
-        ),
+    return _chat_respond(
+        clients,
+        model,
+        sys_prompt,
+        history,
+        prompt,
+        attachments,
+        allow_code=allow_code,
+        allow_search=True,
+        thinking_level=thinking_level,
+        label="respond",
     )
-    if os.environ.get("AGENT_DEBUG"):
-        cand = (getattr(resp, "candidates", None) or [None])[0]
-        parts = getattr(getattr(cand, "content", None), "parts", None) or []
-        kinds = [
-            attr
-            for p in parts
-            for attr in (
-                "text", "executable_code", "code_execution_result",
-                "function_call",
-            )
-            if getattr(p, attr, None)
-        ]
-        ran_code = "executable_code" in kinds
-        print(f"[respond parts] {kinds} code_executed={ran_code}")
-    usage = _log_usage("respond", resp)
-    return _assemble_answer(resp), usage
 
 
 # ---------- attachments (session-only uploads) ----------
@@ -671,6 +850,55 @@ def attachment_parts(attachments: list[Attachment]) -> list[types.Part]:
     return parts
 
 
+def attachment_blocks(attachments: list[Attachment]) -> list[dict]:
+    """Anthropic content blocks for the user message: a text block (with the same
+    marker as the Gemini path) for extracted text/spreadsheets, a base64 image
+    block for images, and a base64 document block for PDFs (placed before any
+    text by the caller). On the Claude path image-only uploads arrive here as
+    vision inputs because the image-generation fast-path is skipped."""
+    blocks: list[dict] = []
+    for a in attachments:
+        if a.text is not None:
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f"--- ATTACHED FILE: {a.name} ({a.mime}) ---\n"
+                    f"{a.text}\n--- END FILE: {a.name} ---"
+                ),
+            })
+        elif a.mime == "application/pdf":
+            blocks.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.b64encode(a.data).decode("ascii"),
+                },
+            })
+        else:  # image/*
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": a.mime,
+                    "data": base64.b64encode(a.data).decode("ascii"),
+                },
+            })
+    return blocks
+
+
+def _history_to_claude(history: list[types.Content]) -> list[dict]:
+    """Convert windowed Gemini history (list[types.Content]) to Anthropic message
+    dicts. Gemini role 'model' maps to 'assistant'; part texts are joined."""
+    out: list[dict] = []
+    for c in history:
+        role = "assistant" if c.role == "model" else "user"
+        text = "".join(p.text or "" for p in (c.parts or []))
+        if text:
+            out.append({"role": role, "content": text})
+    return out
+
+
 def attachment_manifest(attachments: list[Attachment]) -> str:
     """Text markers persisted to the turns table in place of the bytes."""
     return "\n".join(
@@ -713,37 +941,29 @@ _IMAGE_INTENT_INSTRUCTIONS_WITH_REFS = (
 
 
 def detect_image_intent(
-    client: genai.Client, prompt: str, model: str = MODEL,
+    clients: Clients, prompt: str, model: str = MODEL,
     has_reference_images: bool = False,
 ) -> dict:
     """Cheap classifier: does the user want a NEW image? Returns
     {"image": bool, "prompt": str}. Failure-safe — returns image=False on any
-    parse/transport hiccup so a turn never dies in the gate."""
-    resp = _generate(
-        client,
-        model=model,
-        contents=f"User prompt:\n{prompt}\n\nJSON:",
-        config=types.GenerateContentConfig(
-            system_instruction=(
-                _IMAGE_INTENT_INSTRUCTIONS_WITH_REFS
-                if has_reference_images
-                else _IMAGE_INTENT_INSTRUCTIONS
-            ),
-            response_mime_type="application/json",
-        ),
+    parse/transport hiccup so a turn never dies in the gate. Only reached on the
+    Gemini path (the fast-path is gated to Gemini), but routes through the shared
+    adapter for consistency."""
+    system = (
+        _IMAGE_INTENT_INSTRUCTIONS_WITH_REFS
+        if has_reference_images
+        else _IMAGE_INTENT_INSTRUCTIONS
     )
-    _log_usage("image-intent", resp)
-    try:
-        data = json.loads(resp.text or "")
-        if isinstance(data, dict) and data.get("image"):
-            return {"image": True, "prompt": (data.get("prompt") or prompt).strip()}
-    except (json.JSONDecodeError, TypeError):
-        pass
+    data, _ = _chat_json(
+        clients, model, system, f"User prompt:\n{prompt}\n\nJSON:", "image-intent"
+    )
+    if isinstance(data, dict) and data.get("image"):
+        return {"image": True, "prompt": (data.get("prompt") or prompt).strip()}
     return {"image": False, "prompt": ""}
 
 
 def generate_image(
-    client: genai.Client, image_prompt: str,
+    clients: Clients, image_prompt: str,
     reference_images: list[Attachment] | None = None,
 ) -> tuple[bytes | None, str, str]:
     """Call the native-image model. Returns (image_bytes|None, mime, caption_text).
@@ -756,7 +976,7 @@ def generate_image(
             types.Part(text=image_prompt)
         ]
     resp = _generate(
-        client,
+        clients.gemini,
         model=IMAGE_MODEL,
         contents=contents,
         config=types.GenerateContentConfig(
@@ -918,7 +1138,7 @@ def _strip_leading_frontmatter(body: str) -> str:
 
 
 def reflect_and_edit(
-    client: genai.Client,
+    clients: Clients,
     prompt: str,
     answer: str,
     all_skills: list[Skill],
@@ -957,27 +1177,13 @@ def reflect_and_edit(
         f"User prompt:\n{prompt}\n\nAssistant answer:\n{answer}\n\n"
         "Return edits JSON:"
     )
-    resp = _generate(
-        client,
-        model=model,
-        contents=user,
-        config=types.GenerateContentConfig(
-            system_instruction=EDIT_INSTRUCTIONS,
-            response_mime_type="application/json",
-        ),
-    )
-    _log_usage("reflect", resp)
-    raw = resp.text or ""
+    data, _ = _chat_json(clients, model, EDIT_INSTRUCTIONS, user, "reflect")
     if os.environ.get("AGENT_DEBUG"):
-        print(f"[reflect raw]: {raw[:500]}")
-    try:
-        data = json.loads(raw)
+        print(f"[reflect parsed]: {str(data)[:500]}")
+    if isinstance(data, dict):
         edits = data.get("edits", [])
         return edits if isinstance(edits, list) else []
-    except (json.JSONDecodeError, TypeError, AttributeError) as e:
-        if os.environ.get("AGENT_DEBUG"):
-            print(f"[reflect parse error]: {e}")
-        return []
+    return []
 
 
 SESSION_INSTRUCTIONS = """\
@@ -994,10 +1200,12 @@ If the session was trivial (one or two turns of small talk, no substance), retur
 
 
 def summarize_session_to_skill(
-    client: genai.Client, ctx: UserCtx, session_id: str
+    clients: Clients, ctx: UserCtx, session_id: str
 ) -> str | None:
     """Roll a chat into a `session-<ts>` active skill. Returns the skill name
-    or None if the session was trivial or already rolled up."""
+    or None if the session was trivial or already rolled up. Routes to the
+    provider of ctx.model, so a Claude-only user's session summarizes on
+    Anthropic."""
     if SessionStore.is_rolled_up(ctx.user_id, session_id):
         return None
     history = load_session(ctx, session_id)
@@ -1007,32 +1215,24 @@ def summarize_session_to_skill(
         f"{c.role.upper()}: {''.join(p.text or '' for p in c.parts)}"
         for c in history
     )
-    resp = _generate(
-        client,
-        model=ctx.model,
-        contents=f"Transcript:\n{transcript}\n\nReturn JSON:",
-        config=types.GenerateContentConfig(
-            system_instruction=SESSION_INSTRUCTIONS,
-            response_mime_type="application/json",
-        ),
+    data, _ = _chat_json(
+        clients,
+        ctx.model,
+        SESSION_INSTRUCTIONS,
+        f"Transcript:\n{transcript}\n\nReturn JSON:",
+        "session",
     )
-    _log_usage("session", resp)
-    raw = resp.text or ""
-    try:
-        data = json.loads(raw)
-        if data.get("description") and data.get("body"):
-            # Reuse the prior skill name when re-summarizing a returned-to chat,
-            # so the updated summary overwrites it instead of leaving a stale
-            # duplicate. Fresh sessions get a new timestamped name.
-            name = SessionStore.rollup_skill(ctx.user_id, session_id)
-            if not name:
-                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                name = f"session-{stamp}"
-            write_skill(ctx, name, data["description"], data["body"], tier="active")
-            SessionStore.mark_rolled_up(ctx.user_id, session_id, name)
-            return name
-    except (json.JSONDecodeError, TypeError, AttributeError):
-        pass
+    if isinstance(data, dict) and data.get("description") and data.get("body"):
+        # Reuse the prior skill name when re-summarizing a returned-to chat,
+        # so the updated summary overwrites it instead of leaving a stale
+        # duplicate. Fresh sessions get a new timestamped name.
+        name = SessionStore.rollup_skill(ctx.user_id, session_id)
+        if not name:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            name = f"session-{stamp}"
+        write_skill(ctx, name, data["description"], data["body"], tier="active")
+        SessionStore.mark_rolled_up(ctx.user_id, session_id, name)
+        return name
     return None
 
 
@@ -1125,7 +1325,7 @@ class TurnResult:
 
 
 def run_turn_events(
-    client: genai.Client,
+    clients: Clients,
     ctx: UserCtx,
     session_id: str,
     prompt: str,
@@ -1134,10 +1334,11 @@ def run_turn_events(
 ):
     """Generator. Yields {stage, msg, ...} dicts. Final event has stage='done'.
 
-    `allow_code_execution` enables Gemini's code execution tool in `respond`.
-    CLI passes True; the server leaves it False to keep the web path text-only.
+    `allow_code_execution` enables Gemini's code execution tool in `respond`
+    (ignored on the Claude path). CLI passes True; the server leaves it False to
+    keep the web path text-only.
 
-    `attachments` are session-only uploads: their bytes go to Gemini for this
+    `attachments` are session-only uploads: their bytes go to the model for this
     turn but only a text marker is persisted (see attachment_manifest).
     """
     yield {"stage": "load", "msg": "Reading skill catalog…"}
@@ -1157,21 +1358,27 @@ def run_turn_events(
     # Image-only attachments stay eligible: they become reference inputs for
     # image-to-image ("redraw me as X"). Any non-image attachment (pdf, text,
     # spreadsheet) skips the path — those turns are about analysing the uploads.
+    # Image generation is Gemini-only: skip the fast-path entirely on the Claude
+    # path (and whenever there's no Gemini client), so a Claude user needs no
+    # Gemini key and a "draw …" prompt just gets a text reply.
     image_refs = [
         a for a in (attachments or []) if a.mime.startswith("image/")
     ]
     images_only = len(image_refs) == len(attachments or [])
-    if _image_gen_enabled() and images_only:
+    gemini_image_ok = (
+        provider_of(ctx.model) == "gemini" and clients.gemini is not None
+    )
+    if _image_gen_enabled() and images_only and gemini_image_ok:
         yield {"stage": "image_intent", "msg": "Checking for an image request…"}
         intent = detect_image_intent(
-            client, prompt, model=ctx.model,
+            clients, prompt, model=ctx.model,
             has_reference_images=bool(image_refs),
         )
         if intent.get("image"):
             img_prompt = intent.get("prompt") or prompt
             yield {"stage": "image_gen", "msg": "Generating image…"}
             data, mime, caption = generate_image(
-                client, img_prompt, reference_images=image_refs or None
+                clients, img_prompt, reference_images=image_refs or None
             )
             loaded_summary = {
                 "system": [s.name for s in system_skills],
@@ -1232,7 +1439,7 @@ def run_turn_events(
         "stage": "pick",
         "msg": f"Picking relevant skills from {len(skills) - len(system_skills)} options…",
     }
-    chosen_names = pick_skills(client, persisted_prompt, skills, model=ctx.model)
+    chosen_names = pick_skills(clients, persisted_prompt, skills, model=ctx.model)
     picked = [s for s in skills if s.name in chosen_names]
     active_loaded = [s for s in picked if s.tier == "active"]
     archive_picked = [s for s in picked if s.tier == "archive"]
@@ -1240,7 +1447,7 @@ def run_turn_events(
     archive_excerpts: list[tuple[Skill, str]] = []
     for s in archive_picked:
         yield {"stage": "archive", "msg": f"Retrieving sections from archive: {s.name}"}
-        excerpt = pick_archive_sections(client, prompt, s, model=ctx.model)
+        excerpt = pick_archive_sections(clients, prompt, s, model=ctx.model)
         archive_excerpts.append((s, excerpt))
 
     loaded_summary = {
@@ -1260,7 +1467,7 @@ def run_turn_events(
             f"[history window] full={len(full_history)} sent={len(history)}"
         )
     answer, usage = respond(
-        client,
+        clients,
         prompt,
         system_skills,
         active_loaded,
@@ -1280,7 +1487,7 @@ def run_turn_events(
     if _reflect_enabled():
         yield {"stage": "reflect", "msg": "Reflecting on what to remember…"}
         edits = reflect_and_edit(
-            client,
+            clients,
             persisted_prompt,
             answer,
             all_skills=skills,
@@ -1318,7 +1525,7 @@ def run_turn_events(
 
 
 def run_turn(
-    client: genai.Client,
+    clients: Clients,
     ctx: UserCtx,
     session_id: str,
     prompt: str,
@@ -1328,7 +1535,7 @@ def run_turn(
     """Drains run_turn_events. Kept for CLI compatibility."""
     final: dict | None = None
     for ev in run_turn_events(
-        client, ctx, session_id, prompt,
+        clients, ctx, session_id, prompt,
         allow_code_execution=allow_code_execution,
         attachments=attachments,
     ):
@@ -1369,9 +1576,6 @@ def main() -> None:
     if "--consolidate" in sys.argv:
         _run_consolidate_cli()
         return
-    if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
-        print("Set GEMINI_API_KEY or GOOGLE_API_KEY.", file=sys.stderr)
-        sys.exit(1)
     if not os.environ.get("DATABASE_URL"):
         print("Set DATABASE_URL (Postgres) before running.", file=sys.stderr)
         sys.exit(1)
@@ -1383,8 +1587,26 @@ def main() -> None:
         print(f"Invalid AGENT_USER_ID: {e}", file=sys.stderr)
         sys.exit(1)
 
-    ctx = UserCtx(user_id=user_id)
-    client = _client()
+    # AGENT_MODEL lets the CLI exercise either provider; invalid values fall back
+    # to MODEL via UserCtx.__post_init__. Only the chosen provider's key is
+    # required at startup.
+    ctx = UserCtx(user_id=user_id, model=os.environ.get("AGENT_MODEL") or MODEL)
+    has_gemini = bool(
+        os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    )
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if provider_of(ctx.model) == "anthropic":
+        if not has_anthropic:
+            print("Set ANTHROPIC_API_KEY for the selected model.", file=sys.stderr)
+            sys.exit(1)
+    elif not has_gemini:
+        print("Set GEMINI_API_KEY or GOOGLE_API_KEY.", file=sys.stderr)
+        sys.exit(1)
+
+    clients = Clients(
+        gemini=_client() if has_gemini else None,
+        anthropic=_anthropic_client() if has_anthropic else None,
+    )
     session_id = new_session(ctx)
     code_exec = _code_exec_enabled()
     print(f"Agent ready ({ctx.model}). User: {user_id}. Session: {session_id}")
@@ -1429,7 +1651,7 @@ def main() -> None:
             continue
 
         result = run_turn(
-            client, ctx, session_id, prompt,
+            clients, ctx, session_id, prompt,
             allow_code_execution=code_exec,
             attachments=attachments or None,
         )
@@ -1459,7 +1681,7 @@ def main() -> None:
         if result.edits_applied:
             print(f"[memory: {'; '.join(result.edits_applied)}]\n")
 
-    summarized = summarize_session_to_skill(client, ctx, session_id)
+    summarized = summarize_session_to_skill(clients, ctx, session_id)
     if summarized:
         print(f"[session saved: {summarized}]")
 
