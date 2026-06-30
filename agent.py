@@ -34,7 +34,13 @@ MODEL = "gemini-3.5-flash"
 # Claude Haiku 4.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
 # web search only — no image generation, no code execution, no thinking config.
 CLAUDE_MODEL = "claude-haiku-4-5"
-ALLOWED_MODELS = ("gemini-3.5-flash", "gemini-3.1-flash-lite", CLAUDE_MODEL)
+CLAUDE_SONNET_MODEL = "claude-sonnet-5"  # Sonnet 5 (Anthropic). Same v1 path as Haiku.
+ALLOWED_MODELS = (
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    CLAUDE_MODEL,
+    CLAUDE_SONNET_MODEL,
+)
 
 
 def provider_of(model: str) -> str:
