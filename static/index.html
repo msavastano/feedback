@@ -740,11 +740,11 @@
 
 <div id="apiKey">
   <div class="card">
-    <h1>Add your Gemini API key</h1>
-    <p class="sub">This app uses Google's Gemini models. You bring your own key so usage is billed to your own Google account.</p>
+    <h1>Add your API key</h1>
+    <p class="sub">You bring your own key so usage is billed to your own account. Add the key for whichever model you pick — Gemini (Google) or Claude (Anthropic).</p>
 
     <div class="explain">
-      <strong>What is this?</strong> A Gemini API key is a secret token that lets this app make AI requests as you. You create it at Google AI Studio.
+      <strong>Gemini key (Google):</strong> create one at AI Studio for the Gemini models.
       <ol>
         <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">aistudio.google.com/apikey</a> and sign in with your Google account.</li>
         <li>Click <strong>Create API key</strong> (pick a Google Cloud project, or let it make one).</li>
@@ -753,15 +753,20 @@
       </ol>
     </div>
 
-    <div class="notice">
-      ⚠️ <strong>A free-tier key won't work here.</strong> Each message fires several model calls, which blows past the free tier's per-minute limit and fails with a <code>429</code> quota error. Use a <strong>billing-enabled (paid tier) key</strong>. Pick the <strong>gemini-3.1-flash-lite</strong> model and light use runs only fractions of a penny.
+    <div class="explain">
+      <strong>Anthropic key (Claude):</strong> create one in the <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">Anthropic Console</a> to use <strong>Claude Haiku 4.5</strong>. It looks like <code>sk-ant-…</code>. Claude users don't need a Gemini key (image generation stays Gemini-only).
     </div>
 
     <div class="notice">
-      🔒 Your key is kept <strong>only in this browser tab</strong> (session storage). It's sent with each request to power the AI and is <strong>never saved on our server</strong>. Closing the tab or logging out erases it — you'll re-enter it next time. Treat it like a password and don't share it.
+      ⚠️ <strong>A free-tier Gemini key won't work here.</strong> Each message fires several model calls, which blows past the free tier's per-minute limit and fails with a <code>429</code> quota error. Use a <strong>billing-enabled (paid tier) key</strong>.
     </div>
 
-    <input id="apiKeyInput" type="password" placeholder="Paste your Gemini API key (AIza…)" autocomplete="off" spellcheck="false" />
+    <div class="notice">
+      🔒 Your key(s) are kept <strong>only in this browser tab</strong> (session storage). They're sent with each request to power the AI and are <strong>never saved on our server</strong>. Closing the tab or logging out erases them — you'll re-enter them next time. Treat them like passwords and don't share them.
+    </div>
+
+    <input id="apiKeyInput" type="password" placeholder="Gemini API key (AIza…)" autocomplete="off" spellcheck="false" />
+    <input id="anthropicKeyInput" type="password" placeholder="Anthropic API key (sk-ant-…)" autocomplete="off" spellcheck="false" style="margin-top:8px;" />
     <div class="row">
       <button type="button" id="apiKeySave">Save key &amp; continue</button>
     </div>
@@ -838,6 +843,8 @@ const THINKING_STORAGE_KEY = "agent_thinking";
 // but is erased when the tab/browser closes — matching "lasts as long as the
 // browser session." Never persisted to localStorage or the server.
 const GEMINI_KEY_STORAGE = "agent_gemini_key";
+// Anthropic (Claude) key — same session-only BYOK contract as the Gemini key.
+const ANTHROPIC_KEY_STORAGE = "agent_anthropic_key";
 // Last-open session id, for resume-on-reload. (Was referenced but never
 // defined before — every use is inside try/catch, so resume silently no-oped.)
 const SESSION_STORAGE_KEY = "agent_session";
@@ -849,6 +856,23 @@ function setGeminiKey(k) {
 }
 function clearGeminiKey() {
   try { sessionStorage.removeItem(GEMINI_KEY_STORAGE); } catch (e) {}
+}
+function getAnthropicKey() {
+  try { return sessionStorage.getItem(ANTHROPIC_KEY_STORAGE) || ""; } catch (e) { return ""; }
+}
+function setAnthropicKey(k) {
+  try { sessionStorage.setItem(ANTHROPIC_KEY_STORAGE, k); } catch (e) {}
+}
+function clearAnthropicKey() {
+  try { sessionStorage.removeItem(ANTHROPIC_KEY_STORAGE); } catch (e) {}
+}
+// Mirror agent.provider_of: Claude model ids start with "claude".
+function providerOf(model) {
+  return (model || "").startsWith("claude") ? "anthropic" : "gemini";
+}
+// The key required by whatever model is currently selected.
+function keyForCurrentModel() {
+  return providerOf(currentModel) === "anthropic" ? getAnthropicKey() : getGeminiKey();
 }
 let sessionId = null;
 let me = null;
@@ -871,13 +895,15 @@ $("themeToggle").onclick = () => {
 };
 
 async function api(path, opts = {}) {
-  const key = getGeminiKey();
+  const gkey = getGeminiKey();
+  const akey = getAnthropicKey();
   const r = await fetch(path, {
     credentials: "same-origin",
     ...opts,
     headers: {
       "Content-Type": "application/json",
-      ...(key ? { "X-Gemini-Key": key } : {}),
+      ...(gkey ? { "X-Gemini-Key": gkey } : {}),
+      ...(akey ? { "X-Anthropic-Key": akey } : {}),
       ...(opts.headers || {}),
     },
   });
@@ -913,27 +939,38 @@ function showApiKey() {
   $("app").style.display = "none";
   $("login").classList.remove("show");
   $("apiKeyError").style.display = "none";
-  $("apiKeyInput").value = "";
+  // Pre-fill with any keys already stored so the user only fills the gap.
+  $("apiKeyInput").value = getGeminiKey();
+  $("anthropicKeyInput").value = getAnthropicKey();
   $("apiKey").classList.add("show");
-  $("apiKeyInput").focus();
+  // Focus the field for whichever model is selected.
+  (providerOf(currentModel) === "anthropic"
+    ? $("anthropicKeyInput") : $("apiKeyInput")).focus();
 }
 
 function saveApiKey() {
-  const k = $("apiKeyInput").value.trim();
-  if (!k) {
-    $("apiKeyError").textContent = "Please paste your Gemini API key.";
+  const g = $("apiKeyInput").value.trim();
+  const a = $("anthropicKeyInput").value.trim();
+  // Persist whatever was entered (either or both providers).
+  if (g) setGeminiKey(g); else clearGeminiKey();
+  if (a) setAnthropicKey(a); else clearAnthropicKey();
+  // Require at least the key for the currently selected model.
+  if (!keyForCurrentModel()) {
+    const need = providerOf(currentModel) === "anthropic" ? "Anthropic" : "Gemini";
+    $("apiKeyError").textContent = `Please paste your ${need} API key for the selected model.`;
     $("apiKeyError").style.display = "block";
     return;
   }
-  setGeminiKey(k);
   $("apiKey").classList.remove("show");
   init();
 }
 
 $("apiKeySave").onclick = saveApiKey;
-$("apiKeyInput").addEventListener("keydown", (e) => {
+function apiKeyEnter(e) {
   if (e.key === "Enter") { e.preventDefault(); saveApiKey(); }
-});
+}
+$("apiKeyInput").addEventListener("keydown", apiKeyEnter);
+$("anthropicKeyInput").addEventListener("keydown", apiKeyEnter);
 
 async function showLogin() {
   $("app").style.display = "none";
@@ -1410,7 +1447,7 @@ function showBusy(text) {
 }
 
 async function send(message) {
-  const key = getGeminiKey();
+  const key = keyForCurrentModel();
   if (!key) {
     showApiKey();
     return;
@@ -1428,7 +1465,11 @@ async function send(message) {
     const res = await fetch("/api/chat", {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", "X-Gemini-Key": key },
+      headers: {
+        "Content-Type": "application/json",
+        ...(getGeminiKey() ? { "X-Gemini-Key": getGeminiKey() } : {}),
+        ...(getAnthropicKey() ? { "X-Anthropic-Key": getAnthropicKey() } : {}),
+      },
       body: JSON.stringify({
         session_id: sessionId,
         message,
@@ -1560,8 +1601,10 @@ async function init() {
     return;
   }
   // Logged in, but the AI key only lives in this browser session — prompt for
-  // it if we don't have it yet (first visit, or after closing the tab).
-  if (!getGeminiKey()) {
+  // it if we don't have the key for the selected model yet (first visit, or
+  // after closing the tab). Gemini models need a Gemini key; Claude needs an
+  // Anthropic key.
+  if (!keyForCurrentModel()) {
     showApiKey();
     return;
   }
@@ -1594,6 +1637,9 @@ function initModelSelect(allowed) {
   sel.onchange = () => {
     currentModel = sel.value;
     localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
+    // Switching to a provider whose key we don't have yet: prompt for it now
+    // rather than failing on the next send.
+    if (!keyForCurrentModel()) showApiKey();
   };
 }
 
@@ -1670,7 +1716,7 @@ $("newSession").onclick = async () => {
     try {
       await api("/api/session/end", {
         method: "POST",
-        body: JSON.stringify({ session_id: sessionId }),
+        body: JSON.stringify({ session_id: sessionId, model: currentModel }),
       });
     } catch (e) {
       // best-effort — still start the new chat
@@ -1691,6 +1737,7 @@ $("newSession").onclick = async () => {
 $("logout").onclick = async () => {
   flushSessionBeacon();
   clearGeminiKey();
+  clearAnthropicKey();
   try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
   await fetch("/api/logout", { method: "POST" });
   location.reload();
@@ -1729,10 +1776,16 @@ $("consolidateBtn").onclick = async () => {
 function flushSessionBeacon() {
   if (!sessionId || turnsThisSession < 1) return;
   try {
-    // sendBeacon can't set headers, so the key rides in the body. Read it now —
-    // sessionStorage is still alive during pagehide.
+    // sendBeacon can't set headers, so the key(s) ride in the body. Read them
+    // now — sessionStorage is still alive during pagehide. Include the model so
+    // the summary routes to the right provider.
     const blob = new Blob(
-      [JSON.stringify({ session_id: sessionId, gemini_key: getGeminiKey() })],
+      [JSON.stringify({
+        session_id: sessionId,
+        model: currentModel,
+        gemini_key: getGeminiKey(),
+        anthropic_key: getAnthropicKey(),
+      })],
       { type: "application/json" },
     );
     navigator.sendBeacon("/api/session/end", blob);

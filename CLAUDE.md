@@ -7,9 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 # install
 pip install -r requirements.txt
-$env:GEMINI_API_KEY = "..."   # or GOOGLE_API_KEY
+$env:GEMINI_API_KEY = "..."   # or GOOGLE_API_KEY (Gemini models + image gen)
+$env:ANTHROPIC_API_KEY = "..." # Claude Haiku 4.5 chat model (optional)
 $env:GOOGLE_CLIENT_ID = "..." # OAuth 2.0 Web client ID from Google Cloud Console
                               # authorized JS origin: http://127.0.0.1:8000
+
+# CLI model selection (which provider the single-process CLI talks to). Defaults
+# to MODEL (gemini-3.5-flash); set to a Claude id to exercise the Anthropic path.
+$env:AGENT_MODEL = "claude-haiku-4-5"  # needs ANTHROPIC_API_KEY; no Gemini key required
 
 # web server (Google OAuth login, bind to loopback only)
 uvicorn server:app --host 127.0.0.1 --port 8000
@@ -120,9 +125,30 @@ Each chat creates `sessions/<16-hex>.jsonl` (one JSON record per line). On `/api
 
 Cookie payload shape is `{"user_id": "..."}`. Downstream code is identity-source-agnostic. Bind to `127.0.0.1` only.
 
-### Model
+### Model providers
 
-Default `MODEL = "gemini-3.5-flash"` in [agent.py](agent.py). All users run the same model — per-user override removed with mock_users.json.
+Default `MODEL = "gemini-3.5-flash"` in [agent.py](agent.py). `ALLOWED_MODELS` also
+includes `CLAUDE_MODEL = "claude-haiku-4-5"` (Anthropic). `provider_of(model)`
+routes a chat model to its SDK by id prefix (`claude*` → Anthropic, else Gemini).
+
+A `Clients` dataclass (`{gemini, anthropic}`, either may be `None`) is threaded
+where the single `client` used to be. Two adapters absorb all provider branching
+so the seven helpers stay thin: `_chat_json` (pick / archive / image-intent /
+reflect / session-summary) and `_chat_respond` (the `respond` tail). The Gemini
+branch is unchanged (`_generate` + `google_search` + `ThinkingConfig`, plus
+optional code execution). The Claude branch calls `messages.create` with the
+server-side `web_search_20250305` tool, loops on `stop_reason == "pause_turn"`,
+and parses JSON via `_extract_json` (fence/balance-tolerant — Haiku structured
+output isn't assumed). Anthropic usage feeds the same `[tokens <label>]` print
+via `_log_anthropic_usage`.
+
+**Claude path is v1-scoped:** no image generation (the fast-path is gated to
+Gemini — a Claude user needs no Gemini key), no code execution, and
+`thinking_level` is ignored (Haiku supports neither adaptive thinking nor
+`effort`). BYOK: the web path takes the Anthropic key via the `X-Anthropic-Key`
+header (mirrors `X-Gemini-Key`); `api_chat` requires the key for the chosen
+model's provider. `api_session_end` takes the session's `model` so the rollup
+summary routes to the right provider.
 
 ### Token logging
 

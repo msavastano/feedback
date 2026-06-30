@@ -31,7 +31,9 @@ from agent import (
     ALLOWED_MODELS,
     MODEL,
     THINKING_LEVEL_NAMES,
+    Clients,
     UserCtx,
+    _anthropic_client,
     _client,
     apply_edits,
     consolidate,
@@ -41,6 +43,7 @@ from agent import (
     load_skills,
     new_session,
     prepare_attachments,
+    provider_of,
     run_turn,
     run_turn_events,
     session_turns,
@@ -103,17 +106,18 @@ def _ctx(user_id: str = Depends(current_user)) -> UserCtx:
     return UserCtx(user_id=user_id)
 
 
-def gemini_key(x_gemini_key: str | None = Header(default=None)) -> str:
+def gemini_key(x_gemini_key: str | None = Header(default=None)) -> str | None:
     """The caller's Gemini API key, supplied per-request via the `X-Gemini-Key`
     header. The key lives only in the user's browser session — the server never
-    stores it. Endpoints that call Gemini depend on this."""
-    key = (x_gemini_key or "").strip()
-    if not key:
-        raise HTTPException(
-            status_code=400,
-            detail="missing Gemini API key (X-Gemini-Key header)",
-        )
-    return key
+    stores it. Optional: returns None when absent; `api_chat` enforces the key
+    for whichever provider the chosen model needs."""
+    return (x_gemini_key or "").strip() or None
+
+
+def anthropic_key(x_anthropic_key: str | None = Header(default=None)) -> str | None:
+    """The caller's Anthropic API key, supplied per-request via the
+    `X-Anthropic-Key` header. Same BYOK contract as `gemini_key`; optional."""
+    return (x_anthropic_key or "").strip() or None
 
 
 class GoogleLoginBody(BaseModel):
@@ -224,13 +228,26 @@ class ChatBody(BaseModel):
 def api_chat(
     body: ChatBody,
     user_id: str = Depends(current_user),
-    api_key: str = Depends(gemini_key),
+    gkey: str | None = Depends(gemini_key),
+    akey: str | None = Depends(anthropic_key),
 ) -> StreamingResponse:
     """NDJSON stream of stage events. First line: {session_id}. Last: {stage:'done', ...}."""
     chosen = body.model if body.model in ALLOWED_MODELS else MODEL
     ctx = UserCtx(
         user_id=user_id, model=chosen, thinking_level=body.thinking_level
     )
+    # Require the key for the chosen model's provider. 400 (the UI treats it as
+    # "supply your key"); attachment errors below use 422 to stay distinct.
+    if provider_of(chosen) == "anthropic" and not akey:
+        raise HTTPException(
+            status_code=400,
+            detail="missing Anthropic API key (X-Anthropic-Key header)",
+        )
+    if provider_of(chosen) == "gemini" and not gkey:
+        raise HTTPException(
+            status_code=400,
+            detail="missing Gemini API key (X-Gemini-Key header)",
+        )
     attachments = None
     if body.attachments:
         try:
@@ -238,9 +255,12 @@ def api_chat(
                 [a.model_dump() for a in body.attachments]
             )
         except ValueError as e:
-            # 422 (not 400): the UI treats 400 as "missing Gemini key".
+            # 422 (not 400): the UI treats 400 as "missing API key".
             raise HTTPException(status_code=422, detail=str(e))
-    client = _client(api_key)
+    clients = Clients(
+        gemini=_client(gkey) if gkey else None,
+        anthropic=_anthropic_client(akey) if akey else None,
+    )
     session_id = body.session_id or new_session(ctx)
 
     allow_code_execution = user_id in CODE_EXEC_USERS
@@ -249,7 +269,7 @@ def api_chat(
         yield json.dumps({"stage": "init", "session_id": session_id}) + "\n"
         try:
             for ev in run_turn_events(
-                client, ctx, session_id, body.message,
+                clients, ctx, session_id, body.message,
                 allow_code_execution=allow_code_execution,
                 attachments=attachments,
             ):
@@ -262,25 +282,37 @@ def api_chat(
 
 class SessionEndBody(BaseModel):
     session_id: str
+    # The session has no stored model, so the browser passes the model it was
+    # chatting with so the summary routes to the right provider.
+    model: str | None = None
     # sendBeacon (fired on pagehide) cannot set headers, so the browser passes
-    # the key in the body on that path. The explicit "End session" button uses
-    # the X-Gemini-Key header instead.
+    # the key(s) in the body on that path. The header forms are also accepted.
     gemini_key: str | None = None
+    anthropic_key: str | None = None
 
 
 @app.post("/api/session/end")
 def api_session_end(
     body: SessionEndBody,
-    ctx: UserCtx = Depends(_ctx),
+    user_id: str = Depends(current_user),
     x_gemini_key: str | None = Header(default=None),
+    x_anthropic_key: str | None = Header(default=None),
 ) -> dict:
-    key = (body.gemini_key or x_gemini_key or "").strip()
-    if not key:
-        # No key available (e.g. session already gone). Skip summarization
-        # rather than failing — the chat history is already persisted.
-        return {"saved": None, "reason": "no Gemini API key supplied"}
-    client = _client(key)
-    name = summarize_session_to_skill(client, ctx, body.session_id)
+    chosen = body.model if body.model in ALLOWED_MODELS else MODEL
+    ctx = UserCtx(user_id=user_id, model=chosen)
+    gkey = (body.gemini_key or x_gemini_key or "").strip()
+    akey = (body.anthropic_key or x_anthropic_key or "").strip()
+    provider = provider_of(chosen)
+    needed = akey if provider == "anthropic" else gkey
+    if not needed:
+        # No key for the session's provider (e.g. session already gone). Skip
+        # summarization rather than failing — chat history is already persisted.
+        return {"saved": None, "reason": f"no {provider} API key supplied"}
+    clients = Clients(
+        gemini=_client(gkey) if gkey else None,
+        anthropic=_anthropic_client(akey) if akey else None,
+    )
+    name = summarize_session_to_skill(clients, ctx, body.session_id)
     return {"saved": name}
 
 
