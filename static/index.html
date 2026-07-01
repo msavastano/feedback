@@ -879,6 +879,9 @@ let me = null;
 let turnsThisSession = 0;
 let currentModel = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
 let currentThinking = localStorage.getItem(THINKING_STORAGE_KEY) ?? DEFAULT_THINKING;
+// Models whose "think" dropdown does anything server-side (agent.THINKING_CAPABLE_MODELS).
+// Other models (e.g. claude-sonnet-5, which 400s on manual thinking config) show "NA".
+let thinkingCapableModels = [];
 const THEME_STORAGE_KEY = "agent_theme";
 
 function currentTheme() {
@@ -1612,6 +1615,7 @@ async function init() {
   $("apiKey").classList.remove("show");
   $("app").style.display = "grid";
   $("who").innerHTML = `${escapeHtml(me.display_name)}`;
+  thinkingCapableModels = me.thinking_capable_models || [];
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
   initThinkingSelect(me.allowed_thinking_levels || []);
   await refreshSidebar();
@@ -1640,11 +1644,23 @@ function initModelSelect(allowed) {
     // Switching to a provider whose key we don't have yet: prompt for it now
     // rather than failing on the next send.
     if (!keyForCurrentModel()) showApiKey();
+    initThinkingSelect(me.allowed_thinking_levels || []);
   };
 }
 
 function initThinkingSelect(allowed) {
   const sel = $("thinkingSelect");
+  if (!thinkingCapableModels.includes(currentModel)) {
+    sel.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "think: NA";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    sel.onchange = null;
+    return;
+  }
+  sel.disabled = false;
   // "" => Auto (server-side default). Real levels follow.
   const opts = [["", "Auto"]].concat(allowed.map((l) => [l, l]));
   if (!opts.some(([v]) => v === currentThinking)) {

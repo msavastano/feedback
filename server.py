@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from agent import (
     ALLOWED_MODELS,
     MODEL,
+    THINKING_CAPABLE_MODELS,
     THINKING_LEVEL_NAMES,
     Clients,
     UserCtx,
@@ -204,6 +205,7 @@ def api_me(user_id: str = Depends(current_user)) -> dict:
         "model": MODEL,
         "allowed_models": list(ALLOWED_MODELS),
         "allowed_thinking_levels": list(THINKING_LEVEL_NAMES.keys()),
+        "thinking_capable_models": list(THINKING_CAPABLE_MODELS),
     }
 
 

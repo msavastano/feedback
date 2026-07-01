@@ -131,8 +131,7 @@ Default `MODEL = "gemini-3.5-flash"` in [agent.py](agent.py). `ALLOWED_MODELS` a
 includes two Anthropic models, `CLAUDE_MODEL = "claude-haiku-4-5"` and
 `CLAUDE_SONNET_MODEL = "claude-sonnet-5"`. `provider_of(model)` routes a chat
 model to its SDK by id prefix (`claude*` → Anthropic, else Gemini), so both
-Claude ids share the same v1 path (web search, no image gen / code exec /
-thinking).
+Claude ids share the same v1 path (web search, no image gen / code exec).
 
 A `Clients` dataclass (`{gemini, anthropic}`, either may be `None`) is threaded
 where the single `client` used to be. Two adapters absorb all provider branching
@@ -146,9 +145,15 @@ output isn't assumed). Anthropic usage feeds the same `[tokens <label>]` print
 via `_log_anthropic_usage`.
 
 **Claude path is v1-scoped:** no image generation (the fast-path is gated to
-Gemini — a Claude user needs no Gemini key), no code execution, and
-`thinking_level` is ignored (Haiku supports neither adaptive thinking nor
-`effort`). BYOK: the web path takes the Anthropic key via the `X-Anthropic-Key`
+Gemini — a Claude user needs no Gemini key), no code execution. `thinking_level`
+maps to manual extended thinking (`thinking.budget_tokens`) only for
+`CLAUDE_MODEL` (Haiku 4.5) via `CLAUDE_THINKING_BUDGETS`; Sonnet 5 replaced
+manual budget_tokens with always-on adaptive thinking + an `effort` param (not
+wired here) and 400s if sent, so it's excluded from `CLAUDE_THINKING_MODELS`
+and the field is a no-op there. `THINKING_CAPABLE_MODELS` (Gemini models +
+Haiku) is exposed via `/api/me` as `thinking_capable_models` so the UI can
+disable the "think" dropdown (shows "NA") for models where it wouldn't do
+anything, e.g. Sonnet 5. BYOK: the web path takes the Anthropic key via the `X-Anthropic-Key`
 header (mirrors `X-Gemini-Key`); `api_chat` requires the key for the chosen
 model's provider. `api_session_end` takes the session's `model` so the rollup
 summary routes to the right provider.

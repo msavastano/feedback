@@ -32,7 +32,8 @@ from store import SessionStore, SkillStore, UserStore
 
 MODEL = "gemini-3.5-flash"
 # Claude Haiku 4.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
-# web search only — no image generation, no code execution, no thinking config.
+# web search + manual extended thinking (budget_tokens) — no image generation,
+# no code execution.
 CLAUDE_MODEL = "claude-haiku-4-5"
 CLAUDE_SONNET_MODEL = "claude-sonnet-5"  # Sonnet 5 (Anthropic). Same v1 path as Haiku.
 ALLOWED_MODELS = (
@@ -71,6 +72,25 @@ THINKING_LEVEL_NAMES = {
     "high": types.ThinkingLevel.HIGH,
 }
 
+# Claude Haiku 4.5 supports manual extended thinking (thinking.budget_tokens).
+# Claude Sonnet 5 does NOT — manual budget_tokens was replaced by always-on
+# adaptive thinking + an `effort` param on Sonnet 5, and returns a 400 if sent.
+# So only Haiku is wired here; the UI disables the control (shows "NA") for
+# any model not in this set.
+CLAUDE_THINKING_MODELS = (CLAUDE_MODEL,)
+
+# budget_tokens per level, reusing the same minimal/low/medium/high names as
+# the Gemini dropdown. max_tokens must exceed budget_tokens (see _chat_respond).
+CLAUDE_THINKING_BUDGETS = {
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 10000,
+    "high": 32000,
+}
+
+# Models whose "think" dropdown actually does something server-side.
+THINKING_CAPABLE_MODELS = tuple(THINKING_LEVELS.keys()) + CLAUDE_THINKING_MODELS
+
 
 def resolve_thinking_level(model, override=None):
     """Pick the thinking level. Precedence: explicit override (per-request, e.g.
@@ -80,6 +100,19 @@ def resolve_thinking_level(model, override=None):
         if name in THINKING_LEVEL_NAMES:
             return THINKING_LEVEL_NAMES[name]
     return THINKING_LEVELS.get(model, types.ThinkingLevel.MEDIUM)
+
+
+def resolve_claude_thinking_budget(model, override=None):
+    """Pick the Claude budget_tokens. Same override -> env -> default
+    precedence as resolve_thinking_level; None if `model` has no manual
+    thinking support (not in CLAUDE_THINKING_MODELS) or no level resolved."""
+    if model not in CLAUDE_THINKING_MODELS:
+        return None
+    for cand in (override, os.environ.get("AGENT_THINKING_LEVEL")):
+        name = (cand or "").strip().lower()
+        if name in CLAUDE_THINKING_BUDGETS:
+            return CLAUDE_THINKING_BUDGETS[name]
+    return None
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -486,9 +519,11 @@ def _chat_respond(
     prompt that `respond` already assembled. Returns (text, usage)."""
     if provider_of(model) == "anthropic":
         # v1 Claude path: web search (server-side) when allowed; no code
-        # execution and no thinking/effort config (Haiku supports neither —
-        # `effort` errors, adaptive thinking is unavailable, so thinking_level
-        # is ignored here).
+        # execution. Manual extended thinking (budget_tokens) only exists on
+        # Haiku 4.5 — Sonnet 5 uses always-on adaptive thinking + an `effort`
+        # param instead and 400s on budget_tokens, so it's excluded from
+        # CLAUDE_THINKING_MODELS and thinking_level is a no-op for it here.
+        budget = resolve_claude_thinking_budget(model, thinking_level)
         user_content = attachment_blocks(attachments or []) + [
             {"type": "text", "text": prompt}
         ]
@@ -500,12 +535,14 @@ def _chat_respond(
         for _ in range(6):  # bound pause_turn continuations
             kwargs = dict(
                 model=model,
-                max_tokens=CLAUDE_MAX_TOKENS,
+                max_tokens=CLAUDE_MAX_TOKENS + (budget or 0),
                 system=sys_prompt,
                 messages=messages,
             )
             if tools:
                 kwargs["tools"] = tools
+            if budget:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
             resp = clients.anthropic.messages.create(**kwargs)
             if getattr(resp, "stop_reason", None) != "pause_turn":
                 break
