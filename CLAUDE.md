@@ -81,12 +81,12 @@ Skills are markdown files with YAML frontmatter (`name`, `description`). Tier ==
 ### Per-turn pipeline ([agent.py](agent.py) `run_turn_events`)
 
 1. **load** — read frontmatter of every skill (cheap; bodies not loaded yet).
-2. **pick** — `pick_skills()` gives the model the catalog (name + description + tier) and asks for a JSON array of relevant names. System tier is auto-included.
+2. **pick** — `pick_skills()` gives the model the catalog (name + description + tier) plus the last 4 turns of the session (so pronoun-only follow-ups still match) and asks for a JSON array of relevant names. System tier is auto-included.
 3. **archive** — for each picked archive skill, `pick_archive_sections()` asks the model which `##` sections to load (second cheap call per archive hit).
 4. **respond** — `respond()` builds the prompt with system bodies + active bodies + archive excerpts, plus a windowed history (`HISTORY_TURN_CAP`), and calls Gemini with `google_search` grounding enabled.
 5. **persist** — append user + model turns to `sessions/<sid>.jsonl`.
 6. **reflect** — `reflect_and_edit()` emits skill edits (`create` / `update`, tier, name, description, body). **Cost-shaped inputs**: the full catalog is sent as name+description inventory only; full bodies are sent only for `scoped_skills` (system + picked active). Archive bodies are explicitly excluded — archive is cold storage, only the consolidation pass mutates it.
-7. **apply** — `apply_edits()` writes files. `_strip_leading_frontmatter()` defends against the model embedding a YAML block inside `body`.
+7. **apply** — `apply_edits()` writes files. `_strip_leading_frontmatter()` defends against the model embedding a YAML block inside `body`. Every skill update/delete snapshots the pre-image row into the `skill_versions` table (write-only audit trail; recover via SQL).
 
 `run_turn_events` is a generator yielding `{stage, msg, ...}` dicts; the server streams these as NDJSON. `run_turn` drains it for CLI.
 
@@ -117,7 +117,7 @@ Each chat creates `sessions/<16-hex>.jsonl` (one JSON record per line). On `/api
 
 ### Consolidation (offline)
 
-`consolidate()` folds all `session-*` active skills into one `sessions-archive-<timestamp>` archive skill (one `##` section per session). **Non-destructive**: writes to `skills.consolidated/` side path, leaves the live tree untouched. Idempotent via `.consolidated` marker comparing input file mtimes. Manual swap required.
+`consolidate()` folds all `session-*` active skills into one `sessions-archive-<timestamp>` archive skill (one `##` section per session, headed `<name> — <description>` so `pick_archive_sections` can match on topic, not timestamp). **Non-destructive**: writes to `skills.consolidated/` side path, leaves the live tree untouched. Idempotent via `.consolidated` marker comparing input file mtimes. Manual swap required.
 
 ### Auth (single seam)
 

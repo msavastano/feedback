@@ -168,31 +168,57 @@ class SkillStore:
         if tier not in ("system", "active", "archive"):
             tier = "active"
         with get_pool().connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO skills (user_id, tier, name, description, body)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id, name) DO UPDATE SET
-                        tier        = EXCLUDED.tier,
-                        description = EXCLUDED.description,
-                        body        = EXCLUDED.body,
-                        updated_at  = now()
-                    """,
-                    (user_id, tier, name, description, body),
-                )
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    # Snapshot the pre-image so a lossy LLM merge is recoverable.
+                    # Skipped when the body is unchanged (no-op rewrites don't
+                    # spam versions).
+                    cur.execute(
+                        """
+                        INSERT INTO skill_versions
+                            (user_id, name, tier, description, body, op)
+                        SELECT user_id, name, tier, description, body, 'update'
+                        FROM skills
+                        WHERE user_id = %s AND name = %s
+                          AND body IS DISTINCT FROM %s
+                        """,
+                        (user_id, name, body),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO skills (user_id, tier, name, description, body)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, name) DO UPDATE SET
+                            tier        = EXCLUDED.tier,
+                            description = EXCLUDED.description,
+                            body        = EXCLUDED.body,
+                            updated_at  = now()
+                        """,
+                        (user_id, tier, name, description, body),
+                    )
         return name
 
     @staticmethod
     def delete(user_id: str, name: str) -> bool:
         _check_user_id(user_id)
         with get_pool().connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM skills WHERE user_id = %s AND name = %s",
-                    (user_id, name),
-                )
-                return cur.rowcount > 0
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO skill_versions
+                            (user_id, name, tier, description, body, op)
+                        SELECT user_id, name, tier, description, body, 'delete'
+                        FROM skills
+                        WHERE user_id = %s AND name = %s
+                        """,
+                        (user_id, name),
+                    )
+                    cur.execute(
+                        "DELETE FROM skills WHERE user_id = %s AND name = %s",
+                        (user_id, name),
+                    )
+                    return cur.rowcount > 0
 
 
 # ---------- session store ----------

@@ -23,6 +23,19 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 CREATE INDEX IF NOT EXISTS skills_catalog ON skills (user_id, tier);
 
+-- Pre-image audit trail for skill edits/deletes. Write-only; recover via SQL.
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  tier        TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  body        TEXT NOT NULL DEFAULT '',
+  op          TEXT NOT NULL CHECK (op IN ('update','delete')),
+  saved_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS skill_versions_lookup ON skill_versions (user_id, name, saved_at DESC);
+
 CREATE TABLE IF NOT EXISTS sessions (
   user_id     TEXT NOT NULL,
   session_id  TEXT NOT NULL,

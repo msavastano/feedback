@@ -599,8 +599,13 @@ def pick_skills(
     prompt: str,
     skills: list[Skill],
     model: str = MODEL,
+    history_snippet: str = "",
 ) -> list[str]:
-    """Return list of skill names model deems relevant. System tier auto-included."""
+    """Return list of skill names model deems relevant. System tier auto-included.
+
+    `history_snippet` gives the picker recent-turn context so follow-up
+    prompts ("what did I say its stack was?") still match skill descriptions.
+    """
     candidates = [s for s in skills if s.tier != "system"]
     if not candidates:
         return []
@@ -612,7 +617,10 @@ def pick_skills(
         "Return ONLY a JSON array of skill names from the catalog. "
         "Empty array if none apply."
     )
-    user = f"Catalog:\n{catalog}\n\nUser prompt:\n{prompt}\n\nJSON array:"
+    context = (
+        f"Recent conversation:\n{history_snippet}\n\n" if history_snippet else ""
+    )
+    user = f"Catalog:\n{catalog}\n\n{context}User prompt:\n{prompt}\n\nJSON array:"
     names, _ = _chat_json(clients, model, sys_prompt, user, "pick")
     if not isinstance(names, list):
         return []
@@ -621,7 +629,11 @@ def pick_skills(
 
 
 def pick_archive_sections(
-    clients: Clients, prompt: str, skill: Skill, model: str = MODEL
+    clients: Clients,
+    prompt: str,
+    skill: Skill,
+    model: str = MODEL,
+    history_snippet: str = "",
 ) -> str:
     """For archive-tier skill: return only relevant ## sections."""
     sections = split_sections(skill.body)
@@ -632,9 +644,12 @@ def pick_archive_sections(
         "Pick relevant sections from archived skill for the prompt. "
         "Return ONLY a JSON array of section indices (integers)."
     )
+    context = (
+        f"Recent conversation:\n{history_snippet}\n\n" if history_snippet else ""
+    )
     user = (
         f"Skill: {skill.name}\nDescription: {skill.description}\n"
-        f"Sections:\n{headings}\n\nPrompt:\n{prompt}\n\nJSON array of indices:"
+        f"Sections:\n{headings}\n\n{context}Prompt:\n{prompt}\n\nJSON array of indices:"
     )
     idxs, _ = _chat_json(clients, model, sys_prompt, user, f"archive:{skill.name}")
     if not isinstance(idxs, list):
@@ -1307,9 +1322,12 @@ def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
         return summary
 
     # Build one archive skill of all session bodies, one `##` section each.
+    # Heading carries the session's one-line description: pick_archive_sections
+    # shows the model headings only, and a bare timestamp is unmatchable.
     sections = []
     for s in sorted(session_skills, key=lambda x: x.name):
-        sections.append(f"## {s.name}\n\n{s.body.strip()}")
+        heading = f"{s.name} — {s.description}" if s.description else s.name
+        sections.append(f"## {heading}\n\n{s.body.strip()}")
     body = "\n\n".join(sections)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     archive_name = f"sessions-archive-{stamp}"
@@ -1482,7 +1500,14 @@ def run_turn_events(
         "stage": "pick",
         "msg": f"Picking relevant skills from {len(skills) - len(system_skills)} options…",
     }
-    chosen_names = pick_skills(clients, persisted_prompt, skills, model=ctx.model)
+    full_history = load_session(ctx, session_id)
+    recent = "\n".join(
+        f"{c.role}: {''.join(p.text or '' for p in c.parts)[:500]}"
+        for c in full_history[-4:]
+    )
+    chosen_names = pick_skills(
+        clients, persisted_prompt, skills, model=ctx.model, history_snippet=recent
+    )
     picked = [s for s in skills if s.name in chosen_names]
     active_loaded = [s for s in picked if s.tier == "active"]
     archive_picked = [s for s in picked if s.tier == "archive"]
@@ -1490,7 +1515,9 @@ def run_turn_events(
     archive_excerpts: list[tuple[Skill, str]] = []
     for s in archive_picked:
         yield {"stage": "archive", "msg": f"Retrieving sections from archive: {s.name}"}
-        excerpt = pick_archive_sections(clients, prompt, s, model=ctx.model)
+        excerpt = pick_archive_sections(
+            clients, prompt, s, model=ctx.model, history_snippet=recent
+        )
         archive_excerpts.append((s, excerpt))
 
     loaded_summary = {
@@ -1503,7 +1530,6 @@ def run_turn_events(
         "msg": "Thinking…",
         "loaded": loaded_summary,
     }
-    full_history = load_session(ctx, session_id)
     history = _window_history(full_history)
     if len(history) < len(full_history):
         print(
