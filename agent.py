@@ -38,6 +38,7 @@ CLAUDE_MODEL = "claude-haiku-4-5"
 CLAUDE_SONNET_MODEL = "claude-sonnet-5"  # Sonnet 5 (Anthropic). Same v1 path as Haiku.
 ALLOWED_MODELS = (
     "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     CLAUDE_MODEL,
     CLAUDE_SONNET_MODEL,
@@ -59,6 +60,7 @@ IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 # levels AI Studio's generated code pairs with each model.
 THINKING_LEVELS = {
     "gemini-3.5-flash": types.ThinkingLevel.MEDIUM,
+    "gemini-3.5-flash-lite": types.ThinkingLevel.MEDIUM,
     "gemini-3.1-flash-lite": types.ThinkingLevel.MEDIUM,
 }
 
