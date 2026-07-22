@@ -45,6 +45,21 @@ ALLOWED_MODELS = (
 )
 
 
+# USD per 1M tokens (standard tier), input/output — for UI display only. Neither
+# Google nor Anthropic exposes a pricing API (model-list endpoints return
+# capabilities, not price), so this is hand-maintained: update when a provider
+# changes rates or a model is added/swapped here. Shipped to the UI via /api/me.
+# ponytail: hand-kept map, not a startup fetch — swap for an aggregator pull only
+# if these go stale faster than we edit this file.
+PRICING = {
+    "gemini-3.6-flash":      {"input": 1.50, "output": 7.50},
+    "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
+    "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
+    CLAUDE_MODEL:            {"input": 1.00, "output": 5.00},   # claude-haiku-4-5
+    CLAUDE_SONNET_MODEL:     {"input": 3.00, "output": 15.00},  # claude-sonnet-5 (std; intro $2/$10 thru 2026-08-31)
+}
+
+
 def provider_of(model: str) -> str:
     """Route a chat model to its SDK provider. Claude ids start with 'claude'."""
     return "anthropic" if (model or "").startswith("claude") else "gemini"

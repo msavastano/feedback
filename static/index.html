@@ -813,6 +813,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <select id="modelSelect" title="Select model"></select>
+        <span id="modelPrice" style="font-size:12px;opacity:.7;white-space:nowrap" title="Price of the selected model, per 1M tokens"></span>
         <select id="thinkingSelect" title="Thinking level"></select>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
         <button id="logout">Logout</button>
@@ -882,6 +883,19 @@ let currentThinking = localStorage.getItem(THINKING_STORAGE_KEY) ?? DEFAULT_THIN
 // Models whose "think" dropdown does anything server-side (agent.THINKING_CAPABLE_MODELS).
 // Other models (e.g. claude-sonnet-5, which 400s on manual thinking config) show "NA".
 let thinkingCapableModels = [];
+// {model: {input, output}} in USD per 1M tokens (from agent.PRICING via /api/me).
+let modelPricing = {};
+function priceLabel(m) {
+  const p = modelPricing[m];
+  if (!p) return "price n/a";
+  return `$${p.input.toFixed(2)} in / $${p.output.toFixed(2)} out · per 1M tok`;
+}
+function renderModelPrice() {
+  const el = $("modelPrice");
+  if (el) el.textContent = priceLabel(currentModel);
+  const sel = $("modelSelect");           // hover on the closed dropdown too
+  if (sel) sel.title = `${currentModel} — ${priceLabel(currentModel)}`;
+}
 const THEME_STORAGE_KEY = "agent_theme";
 
 function currentTheme() {
@@ -1616,6 +1630,7 @@ async function init() {
   $("app").style.display = "grid";
   $("who").innerHTML = `${escapeHtml(me.display_name)}`;
   thinkingCapableModels = me.thinking_capable_models || [];
+  modelPricing = me.pricing || {};
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
   initThinkingSelect(me.allowed_thinking_levels || []);
   await refreshSidebar();
@@ -1635,12 +1650,15 @@ function initModelSelect(allowed) {
     const opt = document.createElement("option");
     opt.value = m;
     opt.textContent = m;
+    opt.title = priceLabel(m);   // per-option hover tooltip (best-effort; native)
     if (m === currentModel) opt.selected = true;
     sel.appendChild(opt);
   }
+  renderModelPrice();
   sel.onchange = () => {
     currentModel = sel.value;
     localStorage.setItem(MODEL_STORAGE_KEY, currentModel);
+    renderModelPrice();
     // Switching to a provider whose key we don't have yet: prompt for it now
     // rather than failing on the next send.
     if (!keyForCurrentModel()) showApiKey();
