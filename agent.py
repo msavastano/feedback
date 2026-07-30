@@ -481,6 +481,11 @@ def _extract_json(text: str):
 # Per-call max output tokens for the Claude path. Chat answers are short; this
 # keeps non-streaming requests well under the SDK's HTTP timeout guard.
 CLAUDE_MAX_TOKENS = 8192
+# The SDK refuses a non-streaming messages.create() when max_tokens implies a
+# >10min response: 3600 * max_tokens / 128_000 > 600, i.e. max_tokens > 21333
+# (_base_client._calculate_nonstreaming_timeout). max_tokens is answer budget +
+# thinking budget, so cap the sum here instead of switching to streaming.
+CLAUDE_NONSTREAM_MAX_TOKENS = 21_000
 # Server-side web-search tool for Haiku 4.5. The newer _20260209 (dynamic
 # filtering) variant requires Opus 4.6+/Sonnet 4.6 and 400s on Haiku.
 CLAUDE_WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
@@ -541,6 +546,9 @@ def _chat_respond(
         # param instead and 400s on budget_tokens, so it's excluded from
         # CLAUDE_THINKING_MODELS and thinking_level is a no-op for it here.
         budget = resolve_claude_thinking_budget(model, thinking_level)
+        if budget:
+            # "high" (32000) would blow past the SDK's non-streaming ceiling.
+            budget = min(budget, CLAUDE_NONSTREAM_MAX_TOKENS - CLAUDE_MAX_TOKENS)
         user_content = attachment_blocks(attachments or []) + [
             {"type": "text", "text": prompt}
         ]
