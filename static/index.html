@@ -1029,9 +1029,12 @@ async function showLogin() {
 
 function renderBadges(loaded, tokens, meta) {
   const parts = [];
+  // Picker score, when present. System tier is auto-included so it has none.
+  const sc = loaded.scores || {};
+  const s = (n) => (typeof sc[n] === "number" ? ` ${sc[n].toFixed(2)}` : "");
   for (const n of loaded.system || []) parts.push(`<span class="badge sys">sys:${n}</span>`);
-  for (const n of loaded.active || []) parts.push(`<span class="badge act">act:${n}</span>`);
-  for (const n of loaded.archive || []) parts.push(`<span class="badge arc">arc:${n}</span>`);
+  for (const n of loaded.active || []) parts.push(`<span class="badge act">act:${n}${s(n)}</span>`);
+  for (const n of loaded.archive || []) parts.push(`<span class="badge arc">arc:${n}${s(n)}</span>`);
   if (tokens && tokens.total) {
     parts.push(`<span class="badge tok">in:${tokens.in} out:${tokens.out} total:${tokens.total}</span>`);
   }

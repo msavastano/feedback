@@ -619,17 +619,58 @@ def _chat_respond(
     return _assemble_answer(resp), usage
 
 
+def _parse_picks(raw, valid: set[str]) -> list[tuple[str, float]]:
+    """Normalise the picker's JSON into [(name, score)] sorted best-first.
+
+    Tolerates bare strings as well as {"name", "score"} objects: a model that
+    ignores the scored format still yields usable picks (scored 1.0) instead of
+    silently loading nothing. Unknown names are dropped and logged — a
+    hallucinated skill name should be visible, not invisible.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    dropped: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            name, score = item, 1.0
+        elif isinstance(item, dict):
+            name, score = item.get("name"), item.get("score", 1.0)
+        else:
+            continue
+        if not isinstance(name, str):
+            continue
+        if name not in valid:
+            dropped.append(name)
+            continue
+        if name in seen:  # model repeated itself; don't load the body twice
+            continue
+        seen.add(name)
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            score = 1.0
+        out.append((name, max(0.0, min(1.0, float(score)))))
+    if dropped:
+        print(f"[pick dropped] not in catalog: {', '.join(dropped)}")
+    out.sort(key=lambda t: -t[1])
+    return out
+
+
 def pick_skills(
     clients: Clients,
     prompt: str,
     skills: list[Skill],
     model: str = MODEL,
     history_snippet: str = "",
-) -> list[str]:
-    """Return list of skill names model deems relevant. System tier auto-included.
+) -> list[tuple[str, float]]:
+    """Return [(skill_name, score)] best-first. System tier auto-included.
 
     `history_snippet` gives the picker recent-turn context so follow-up
     prompts ("what did I say its stack was?") still match skill descriptions.
+
+    The score is the model's own rough confidence, in the same call — it is a
+    relative ranking within one turn, NOT a calibrated probability. Useful for
+    inspecting/plotting why a skill loaded; don't threshold on it blind.
     """
     candidates = [s for s in skills if s.tier != "system"]
     if not candidates:
@@ -639,18 +680,19 @@ def pick_skills(
     )
     sys_prompt = (
         "You select relevant skills for a user prompt. "
-        "Return ONLY a JSON array of skill names from the catalog. "
-        "Empty array if none apply."
+        "Return ONLY a JSON array of objects, each "
+        '{"name": "<exact name from the catalog>", "score": <0.0-1.0>}. '
+        "score is how confident you are that this skill's contents will help "
+        "answer this specific prompt: 1.0 = certainly needed, 0.5 = might be "
+        "useful, below 0.3 = probably irrelevant. Spread the scores; do not "
+        "give everything the same number. Empty array if none apply."
     )
     context = (
         f"Recent conversation:\n{history_snippet}\n\n" if history_snippet else ""
     )
     user = f"Catalog:\n{catalog}\n\n{context}User prompt:\n{prompt}\n\nJSON array:"
-    names, _ = _chat_json(clients, model, sys_prompt, user, "pick")
-    if not isinstance(names, list):
-        return []
-    valid = {s.name for s in candidates}
-    return [n for n in names if n in valid]
+    raw, _ = _chat_json(clients, model, sys_prompt, user, "pick")
+    return _parse_picks(raw, {s.name for s in candidates})
 
 
 def pick_archive_sections(
@@ -1408,6 +1450,8 @@ class TurnResult:
     edits_applied: list[str]
     tokens: dict
     image: dict | None = None
+    # {skill_name: 0.0-1.0} from the picker. Empty on the image fast path.
+    scores: dict | None = None
 
 
 def run_turn_events(
@@ -1530,10 +1574,13 @@ def run_turn_events(
         f"{c.role}: {''.join(p.text or '' for p in c.parts)[:500]}"
         for c in full_history[-4:]
     )
-    chosen_names = pick_skills(
+    scored = pick_skills(
         clients, persisted_prompt, skills, model=ctx.model, history_snippet=recent
     )
-    picked = [s for s in skills if s.name in chosen_names]
+    scores = dict(scored)
+    by_name = {s.name: s for s in skills}
+    # Keep the picker's ranking — indexing by its order, not the catalog's.
+    picked = [by_name[n] for n, _ in scored]
     active_loaded = [s for s in picked if s.tier == "active"]
     archive_picked = [s for s in picked if s.tier == "archive"]
 
@@ -1549,6 +1596,7 @@ def run_turn_events(
         "system": [s.name for s in system_skills],
         "active": [s.name for s in active_loaded],
         "archive": [s.name for s, _ in archive_excerpts],
+        "scores": scores,
     }
     yield {
         "stage": "respond",
@@ -1645,6 +1693,7 @@ def run_turn(
         edits_applied=final["edits"],
         tokens=final["tokens"],
         image=final.get("image"),
+        scores=final["loaded"].get("scores") or {},
     )
 
 
@@ -1750,13 +1799,17 @@ def main() -> None:
             attachments=attachments or None,
         )
 
+        sc = result.scores or {}
+        named = lambda ns: ",".join(
+            f"{n} {sc[n]:.2f}" if n in sc else n for n in ns
+        )
         tier_summary = []
         if result.loaded_system:
             tier_summary.append(f"system:{len(result.loaded_system)}")
         if result.loaded_active:
-            tier_summary.append(f"active:{','.join(result.loaded_active)}")
+            tier_summary.append(f"active:{named(result.loaded_active)}")
         if result.loaded_archive:
-            tier_summary.append(f"archive:{','.join(result.loaded_archive)}")
+            tier_summary.append(f"archive:{named(result.loaded_archive)}")
         print(f"[loaded {' | '.join(tier_summary) if tier_summary else 'nothing'}]")
 
         print(f"\nagent> {result.answer}\n")
