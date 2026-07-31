@@ -55,8 +55,16 @@ CREATE TABLE IF NOT EXISTS turns (
   role       TEXT NOT NULL CHECK (role IN ('user','model')),
   text       TEXT NOT NULL,
   tokens     JSONB,
+  -- Skill picker's output for this turn, model rows only:
+  --   {"scores": {"<skill>": 0.0-1.0, …}, "catalog": <candidates offered>}
+  -- Self-reported confidence, not calibrated — for inspection/plotting only.
+  picked     JSONB,
   PRIMARY KEY (user_id, session_id, idx),
   FOREIGN KEY (user_id, session_id)
     REFERENCES sessions(user_id, session_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS turns_session ON turns (user_id, session_id, idx);
+
+-- Back-fill for databases created before a column existed. Idempotent, so
+-- re-running this whole file is the migration.
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS picked JSONB;

@@ -291,8 +291,11 @@ def append_turn(
     role: str,
     text: str,
     usage: dict | None = None,
+    picked: dict | None = None,
 ) -> None:
-    SessionStore.append_turn(ctx.user_id, session_id, role, text, tokens=usage)
+    SessionStore.append_turn(
+        ctx.user_id, session_id, role, text, tokens=usage, picked=picked
+    )
 
 
 def load_session(ctx: UserCtx, session_id: str) -> list[types.Content]:
@@ -1623,7 +1626,20 @@ def run_turn_events(
 
     yield {"stage": "persist", "msg": "Saving turn to session log…"}
     append_turn(ctx, session_id, "user", persisted_prompt)
-    append_turn(ctx, session_id, "model", answer, usage=usage)
+    append_turn(
+        ctx,
+        session_id,
+        "model",
+        answer,
+        usage=usage,
+        # Picker scores land on the model row beside its token counts, so
+        # retrieval behaviour can be queried over time. Not read back by the
+        # agent — write-only, like skill_versions.
+        picked={
+            "scores": scores,
+            "catalog": len(skills) - len(system_skills),
+        },
+    )
 
     scoped_for_reflect = system_skills + active_loaded
     if _reflect_enabled():

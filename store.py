@@ -248,8 +248,13 @@ class SessionStore:
         role: str,
         text: str,
         tokens: dict | None = None,
+        picked: dict | None = None,
     ) -> int:
-        """Append a turn. Returns the assigned `idx`."""
+        """Append a turn. Returns the assigned `idx`.
+
+        `picked` is the skill picker's scores for this turn (model rows only);
+        see the `turns.picked` comment in schema.sql for the shape.
+        """
         _check_user_id(user_id)
         _check_session_id(session_id)
         if role not in ("user", "model"):
@@ -274,7 +279,8 @@ class SessionStore:
                     )
                     cur.execute(
                         """
-                        INSERT INTO turns (user_id, session_id, idx, role, text, tokens)
+                        INSERT INTO turns
+                            (user_id, session_id, idx, role, text, tokens, picked)
                         VALUES (
                             %s, %s,
                             COALESCE(
@@ -282,7 +288,7 @@ class SessionStore:
                                  WHERE user_id=%s AND session_id=%s),
                                 0
                             ),
-                            %s, %s, %s
+                            %s, %s, %s, %s
                         )
                         RETURNING idx
                         """,
@@ -294,6 +300,7 @@ class SessionStore:
                             role,
                             text,
                             json.dumps(tokens) if tokens else None,
+                            json.dumps(picked) if picked else None,
                         ),
                     )
                     row = cur.fetchone()
@@ -301,14 +308,14 @@ class SessionStore:
 
     @staticmethod
     def load_turns(user_id: str, session_id: str) -> list[dict]:
-        """Return ordered turns as [{role, text, ts, tokens}]."""
+        """Return ordered turns as [{role, text, ts, tokens, picked}]."""
         _check_user_id(user_id)
         _check_session_id(session_id)
         with get_pool().connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT role, text, ts, tokens
+                    SELECT role, text, ts, tokens, picked
                     FROM turns
                     WHERE user_id = %s AND session_id = %s
                     ORDER BY idx ASC
