@@ -81,7 +81,15 @@ Skills are markdown files with YAML frontmatter (`name`, `description`). Tier ==
 ### Per-turn pipeline ([agent.py](agent.py) `run_turn_events`)
 
 1. **load** — read frontmatter of every skill (cheap; bodies not loaded yet).
-2. **pick** — `pick_skills()` gives the model the catalog (name + description + tier) plus the last 4 turns of the session (so pronoun-only follow-ups still match) and asks for a JSON array of `{name, score}` objects. System tier is auto-included. `_parse_picks()` normalises the reply (tolerates bare strings, drops+logs unknown names, dedupes, clamps 0–1) and sorts best-first; that ranking is preserved downstream. The score is the model's own confidence in the same call — a relative ranking for inspection/plotting, **not** a calibrated probability, and nothing thresholds on it. Scores ride in the `loaded.scores` map on the stream's `respond`/`done` events, show in the UI badges and the CLI `[loaded …]` line, and are **not** persisted.
+2. **pick** — `pick_skills()` gives the model the catalog (name + description + tier) plus the last 4 turns of the session (so pronoun-only follow-ups still match) and asks for a JSON array of `{name, score}` objects. System tier is auto-included. `_parse_picks()` normalises the reply (tolerates bare strings, drops+logs unknown names, dedupes, clamps 0–1) and sorts best-first; that ranking is preserved downstream. The score is the model's own confidence in the same call — a relative ranking for inspection/plotting, **not** a calibrated probability, and nothing thresholds on it. Scores ride in the `loaded.scores` map on the stream's `respond`/`done` events, show in the UI badges and the CLI `[loaded …]` line, and persist to `turns.picked` (JSONB, model rows only) as `{"scores": {...}, "catalog": <candidates offered>}` — write-only, never read back by the agent. Query it for retrieval drift:
+
+```sql
+-- how often each skill gets picked, and how confidently
+SELECT k.key AS skill, count(*) AS picks, round(avg((k.value)::numeric), 2) AS avg_score
+FROM turns t, jsonb_each_text(t.picked->'scores') k
+WHERE t.user_id = 'alice'
+GROUP BY 1 ORDER BY picks DESC;
+```
 3. **archive** — for each picked archive skill, `pick_archive_sections()` asks the model which `##` sections to load (second cheap call per archive hit).
 4. **respond** — `respond()` builds the prompt with system bodies + active bodies + archive excerpts, plus a windowed history (`HISTORY_TURN_CAP`), and calls Gemini with `google_search` grounding enabled.
 5. **persist** — append user + model turns to `sessions/<sid>.jsonl`.
