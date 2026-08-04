@@ -503,13 +503,22 @@ def skill_graph(user_id: str) -> dict:
             )
             edges = [dict(r) for r in cur.fetchall()]
 
+            # `picked` was added to turns after this app had real history, so a
+            # zero pick count means "not picked since scores started", not
+            # "never retrieved". Ship the window so the UI can say which.
             cur.execute(
-                "SELECT count(*) AS n FROM turns "
-                "WHERE user_id = %s AND picked IS NOT NULL",
+                """
+                SELECT count(*) FILTER (WHERE picked IS NOT NULL) AS scored,
+                       count(*) FILTER (WHERE role = 'model')     AS model_turns,
+                       min(ts)  FILTER (WHERE picked IS NOT NULL) AS since
+                FROM turns WHERE user_id = %s
+                """,
                 (user_id,),
             )
-            scored_turns = int(cur.fetchone()["n"])
+            row = cur.fetchone()
 
     graph = _build_graph(catalog, picks, edges)
-    graph["turns"] = scored_turns
+    graph["turns"] = int(row["scored"])
+    graph["model_turns"] = int(row["model_turns"])
+    graph["since"] = row["since"].isoformat() if row["since"] else None
     return graph

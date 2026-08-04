@@ -921,7 +921,7 @@
         <span><i class="sys"></i>system</span>
         <span><i class="act"></i>active</span>
         <span><i class="arc"></i>archive</span>
-        <span><i class="cold"></i>never retrieved</span>
+        <span><i class="cold"></i>unpicked in window</span>
       </div>
       <button type="button" id="graphClose" title="Close (Esc)">×</button>
     </div>
@@ -1562,9 +1562,18 @@ function hideSkillPop() {
 // often the picker retrieved a skill; dim/dashed nodes were never retrieved.
 let graphSim = null;
 let graphEsc = null;
+let graphData = null;
 
 function graphRadius(d) {
   return 6 + Math.sqrt(d.picks) * 3;
+}
+
+// `turns.picked` post-dates most history, so pick counts cover a window, not
+// the lifetime. Every "0 picks" claim has to be scoped to it.
+function graphWindow() {
+  if (!graphData || !graphData.turns) return "any recorded turn";
+  const since = graphData.since ? ` since ${graphData.since.slice(0, 10)}` : "";
+  return `the ${graphData.turns} scored turn${graphData.turns === 1 ? "" : "s"}${since}`;
 }
 
 function renderGraphInfo(d) {
@@ -1579,7 +1588,7 @@ function renderGraphInfo(d) {
   } else {
     rows.push(["picked", `${d.picks}×`]);
     rows.push(["avg score", d.avg_score === null ? "—" : d.avg_score.toFixed(2)]);
-    rows.push(["last picked", d.last_picked ? d.last_picked.slice(0, 10) : "never"]);
+    rows.push(["last picked", d.last_picked ? d.last_picked.slice(0, 10) : "—"]);
   }
   rows.push(["updated", d.updated_at ? d.updated_at.slice(0, 10) : "—"]);
   box.innerHTML =
@@ -1589,7 +1598,7 @@ function renderGraphInfo(d) {
     (d.always
       ? `<p class="gi-hint" style="margin-top:14px">System skills bypass the picker — loaded into every turn, never scored, so they have no connections.</p>`
       : d.picks === 0
-        ? `<p class="gi-hint" style="margin-top:14px">Never retrieved. Either nothing has matched its description yet, or it is dead memory.</p>`
+        ? `<p class="gi-hint" style="margin-top:14px">Not picked in ${graphWindow()}. Scores only exist for turns after the picker started recording them, so this is not a full history — an older skill may well have been retrieved before that.</p>`
         : "");
 }
 
@@ -1694,11 +1703,15 @@ async function openGraph() {
     $("graphSummary").textContent = `Failed to load: ${e.message}`;
     return;
   }
+  graphData = data;
   const cold = data.nodes.filter((n) => !n.always && n.picks === 0).length;
+  const since = data.since ? ` since ${data.since.slice(0, 10)}` : "";
   $("graphSummary").textContent =
-    `${data.nodes.length} skills · ${data.edges.length} connections · ${data.turns} retrieval turns` +
-    (cold ? ` · ${cold} never retrieved` : "") +
-    (data.turns === 0 ? " — no retrieval history yet, so nothing is sized or connected" : "");
+    `${data.nodes.length} skills · ${data.edges.length} connections · ` +
+    (data.turns === 0
+      ? "no pick scores recorded yet, so nothing is sized or connected"
+      : `scores from ${data.turns} of ${data.model_turns} turns${since}` +
+        (cold ? ` · ${cold} unpicked in that window` : ""));
 
   // Degrade to a plain list if the CDN didn't load, same as renderMarkdown.
   if (!window.d3) {
