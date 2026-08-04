@@ -52,7 +52,7 @@ from agent import (
     summarize_session_to_skill,
     validate_user_id,
 )
-from store import UserStore, get_pool
+from store import UserStore, get_pool, skill_graph
 
 STATIC_DIR = Path(__file__).parent / "static"
 COOKIE_NAME = "agent_user"
@@ -351,6 +351,13 @@ def api_skill_get(name: str, ctx: UserCtx = Depends(_ctx)) -> dict:
                 "body": s.body,
             }
     raise HTTPException(status_code=404, detail="skill not found")
+
+
+@app.get("/api/graph")
+def api_graph(ctx: UserCtx = Depends(_ctx)) -> dict:
+    """Skill catalog + how often each is retrieved + which are retrieved
+    together. Backs the map modal."""
+    return skill_graph(ctx.user_id)
 
 
 @app.delete("/api/skill/{name}")

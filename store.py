@@ -414,3 +414,102 @@ class SessionStore:
                     """,
                     (skill_name, user_id, session_id),
                 )
+
+
+# ---------- skill graph ----------
+
+def _build_graph(catalog: list[dict], picks: list[dict], edges: list[dict]) -> dict:
+    """Join the skill catalog with retrieval stats into a node/edge graph.
+
+    Pure so it can be tested without a database. Anything naming a skill that is
+    no longer in the catalog is dropped: `consolidate()` deletes the `session-*`
+    skills it folds into archive, so old `turns.picked` rows routinely reference
+    skills that no longer exist, and the graph is a picture of current memory.
+    """
+    stats = {p["name"]: p for p in picks}
+    nodes = []
+    for row in catalog:
+        p = stats.get(row["name"], {})
+        avg = p.get("avg_score")
+        last = p.get("last_picked")
+        updated = row.get("updated_at")
+        nodes.append(
+            {
+                "name": row["name"],
+                "tier": row["tier"],
+                "description": row.get("description", ""),
+                "chars": row.get("chars", 0),
+                # System skills bypass the picker entirely (auto-included, never
+                # scored), so a pick count on them would read as "never used".
+                "always": row["tier"] == "system",
+                "picks": int(p.get("picks", 0)),
+                "avg_score": None if avg is None else round(float(avg), 2),
+                "last_picked": last.isoformat() if hasattr(last, "isoformat") else last,
+                "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else updated,
+            }
+        )
+    known = {n["name"] for n in nodes if not n["always"]}
+    out_edges = [
+        {"source": e["src"], "target": e["dst"], "weight": int(e["weight"])}
+        for e in edges
+        if e["src"] in known and e["dst"] in known
+    ]
+    return {"nodes": nodes, "edges": out_edges}
+
+
+def skill_graph(user_id: str) -> dict:
+    """Skill catalog + retrieval stats + co-activation edges, for the UI's map.
+
+    Reads `turns.picked` (written by the pick stage, never read back by the
+    agent itself). Turns without a `picked` map -- user rows and the
+    image-generation fast path -- contribute nothing.
+    """
+    _check_user_id(user_id)
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT name, tier, description, length(body) AS chars, updated_at
+                FROM skills WHERE user_id = %s
+                ORDER BY name
+                """,
+                (user_id,),
+            )
+            catalog = [dict(r) for r in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT k.key AS name, count(*) AS picks,
+                       avg((k.value)::numeric) AS avg_score, max(t.ts) AS last_picked
+                FROM turns t, jsonb_each_text(t.picked->'scores') k
+                WHERE t.user_id = %s AND t.picked IS NOT NULL
+                GROUP BY 1
+                """,
+                (user_id,),
+            )
+            picks = [dict(r) for r in cur.fetchall()]
+
+            # a.key < b.key dedupes each pair and drops self-edges.
+            cur.execute(
+                """
+                SELECT a.key AS src, b.key AS dst, count(*) AS weight
+                FROM turns t,
+                     jsonb_object_keys(t.picked->'scores') AS a(key),
+                     jsonb_object_keys(t.picked->'scores') AS b(key)
+                WHERE t.user_id = %s AND t.picked IS NOT NULL AND a.key < b.key
+                GROUP BY 1, 2
+                """,
+                (user_id,),
+            )
+            edges = [dict(r) for r in cur.fetchall()]
+
+            cur.execute(
+                "SELECT count(*) AS n FROM turns "
+                "WHERE user_id = %s AND picked IS NOT NULL",
+                (user_id,),
+            )
+            scored_turns = int(cur.fetchone()["n"])
+
+    graph = _build_graph(catalog, picks, edges)
+    graph["turns"] = scored_turns
+    return graph

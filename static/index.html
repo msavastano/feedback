@@ -567,6 +567,118 @@
   #confirm .ok { background: var(--danger); color: var(--danger-fg); }
   #confirm .ok:hover { filter: brightness(1.08); }
 
+  /* skill map modal */
+  #graphModal {
+    position: fixed;
+    inset: 0;
+    background: var(--overlay);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 40;
+    padding: 24px;
+  }
+  #graphModal.show { display: flex; }
+  #graphModal .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow);
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #graphModal .gm-head {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+  }
+  #graphModal h2 {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+  }
+  #graphModal .gm-sub { font-size: 11px; color: var(--text-mute); margin-top: 2px; }
+  #graphModal .gm-legend {
+    margin-left: auto;
+    display: flex;
+    gap: 14px;
+    font-size: 11px;
+    color: var(--text-3);
+    flex-wrap: wrap;
+  }
+  #graphModal .gm-legend span { display: flex; align-items: center; gap: 5px; }
+  #graphModal .gm-legend i {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  #graphModal .gm-legend i.sys { background: var(--c-sys); }
+  #graphModal .gm-legend i.act { background: var(--c-act); }
+  #graphModal .gm-legend i.arc { background: var(--c-arc); }
+  #graphModal .gm-legend i.cold {
+    background: var(--text-mute);
+    opacity: .35;
+    border: 1px dashed var(--text-3);
+  }
+  #graphClose {
+    background: none;
+    border: none;
+    color: var(--text-3);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  #graphClose:hover { color: var(--text); }
+  #graphModal .gm-body { display: flex; flex: 1 1 auto; min-height: 0; }
+  #graphSvg { flex: 1 1 auto; min-width: 0; display: block; cursor: grab; }
+  #graphSvg:active { cursor: grabbing; }
+  #graphInfo {
+    flex: 0 0 260px;
+    border-left: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  #graphInfo h3 {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    margin: 0 0 6px;
+    color: var(--text);
+    word-break: break-all;
+  }
+  #graphInfo .gi-desc { color: var(--text-3); margin-bottom: 14px; }
+  #graphInfo dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; }
+  #graphInfo dt { color: var(--text-mute); font-size: 11px; }
+  #graphInfo dd { margin: 0; font-family: var(--font-mono); font-size: 11px; }
+  #graphInfo .gi-hint { color: var(--text-mute); font-style: italic; }
+
+  /* graph marks — colored via CSS so they follow the theme toggle for free */
+  .glink { stroke: var(--border-strong); }
+  .gnode { stroke: var(--surface); stroke-width: 1.5px; cursor: pointer; }
+  .gnode.sys { fill: var(--c-sys); }
+  .gnode.act { fill: var(--c-act); }
+  .gnode.arc { fill: var(--c-arc); }
+  .gnode.cold { opacity: .4; stroke: var(--text-3); stroke-dasharray: 2 2; }
+  .gnode.sel { stroke: var(--text); stroke-width: 2.5px; stroke-dasharray: none; }
+  .glabel {
+    fill: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+    user-select: none;
+  }
+  .gempty { fill: var(--text-mute); font-family: var(--font-body); font-size: 13px; }
+
   /* login overlay */
   #login {
     position: fixed;
@@ -710,6 +822,17 @@
     header select { max-width: 110px; }
     #chat { padding: 12px; }
     form#composer { padding: 8px 12px; }
+    #graphModal { padding: 0; }
+    #graphModal .card { border-radius: 0; border: none; }
+    #graphModal .gm-legend { display: none; }
+    #graphModal .gm-body { flex-direction: column; }
+    #graphSvg { flex: 1 1 60%; }
+    #graphInfo {
+      flex: 0 0 auto;
+      max-height: 34%;
+      border-left: none;
+      border-top: 1px solid var(--border);
+    }
   }
 </style>
 <script>
@@ -737,6 +860,7 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 
 <div id="apiKey">
   <div class="card">
@@ -786,6 +910,28 @@
   </div>
 </div>
 
+<div id="graphModal">
+  <div class="card">
+    <div class="gm-head">
+      <div>
+        <h2>Skill map</h2>
+        <div class="gm-sub" id="graphSummary"></div>
+      </div>
+      <div class="gm-legend">
+        <span><i class="sys"></i>system</span>
+        <span><i class="act"></i>active</span>
+        <span><i class="arc"></i>archive</span>
+        <span><i class="cold"></i>never retrieved</span>
+      </div>
+      <button type="button" id="graphClose" title="Close (Esc)">×</button>
+    </div>
+    <div class="gm-body">
+      <svg id="graphSvg"></svg>
+      <div id="graphInfo"></div>
+    </div>
+  </div>
+</div>
+
 <div id="app" style="display:none">
   <div id="sidebarBackdrop"></div>
   <aside>
@@ -815,6 +961,7 @@
         <select id="modelSelect" title="Select model"></select>
         <span id="modelPrice" style="font-size:12px;opacity:.7;white-space:nowrap" title="Price of the selected model, per 1M tokens"></span>
         <select id="thinkingSelect" title="Thinking level"></select>
+        <button id="graphBtn" type="button" title="Skill map — which skills get retrieved, and which get retrieved together">Map</button>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
         <button id="logout">Logout</button>
       </div>
@@ -1410,6 +1557,168 @@ function hideSkillPop() {
   $("skillPop").classList.remove("show");
 }
 
+// ---------- skill map ----------
+// Nodes are skills, edges are "picked in the same turn". Sizes come from how
+// often the picker retrieved a skill; dim/dashed nodes were never retrieved.
+let graphSim = null;
+let graphEsc = null;
+
+function graphRadius(d) {
+  return 6 + Math.sqrt(d.picks) * 3;
+}
+
+function renderGraphInfo(d) {
+  const box = $("graphInfo");
+  if (!d) {
+    box.innerHTML = `<div class="gi-hint">Click a skill to see its stats. Drag to reposition, scroll to zoom.</div>`;
+    return;
+  }
+  const rows = [["tier", d.tier], ["size", `${d.chars} chars`]];
+  if (d.always) {
+    rows.push(["retrieval", "always loaded"]);
+  } else {
+    rows.push(["picked", `${d.picks}×`]);
+    rows.push(["avg score", d.avg_score === null ? "—" : d.avg_score.toFixed(2)]);
+    rows.push(["last picked", d.last_picked ? d.last_picked.slice(0, 10) : "never"]);
+  }
+  rows.push(["updated", d.updated_at ? d.updated_at.slice(0, 10) : "—"]);
+  box.innerHTML =
+    `<h3>${escapeHtml(d.name)}</h3>` +
+    `<div class="gi-desc">${escapeHtml(d.description) || "<em>no description</em>"}</div>` +
+    `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("")}</dl>` +
+    (d.always
+      ? `<p class="gi-hint" style="margin-top:14px">System skills bypass the picker — loaded into every turn, never scored, so they have no connections.</p>`
+      : d.picks === 0
+        ? `<p class="gi-hint" style="margin-top:14px">Never retrieved. Either nothing has matched its description yet, or it is dead memory.</p>`
+        : "");
+}
+
+function drawGraph(data) {
+  const svg = d3.select("#graphSvg");
+  svg.selectAll("*").remove();
+  const box = $("graphSvg").getBoundingClientRect();
+  const w = box.width || 800;
+  const h = box.height || 600;
+
+  if (!data.nodes.length) {
+    svg.append("text").attr("class", "gempty").attr("x", w / 2).attr("y", h / 2)
+      .attr("text-anchor", "middle").text("No skills yet — chat a while and memory will grow.");
+    return;
+  }
+
+  const root = svg.append("g");
+  const zoom = d3.zoom().scaleExtent([0.2, 4]).on("zoom", (e) => root.attr("transform", e.transform));
+  svg.call(zoom);
+
+  const link = root.append("g").selectAll("line").data(data.edges).join("line")
+    .attr("class", "glink")
+    .attr("stroke-width", (d) => Math.min(6, Math.sqrt(d.weight)));
+
+  const tierClass = { system: "sys", active: "act", archive: "arc" };
+  const node = root.append("g").selectAll("circle").data(data.nodes).join("circle")
+    .attr("class", (d) => `gnode ${tierClass[d.tier] || "act"}${!d.always && d.picks === 0 ? " cold" : ""}`)
+    .attr("r", graphRadius)
+    .call(d3.drag()
+      .on("start", (e, d) => {
+        if (!e.active) graphSim.alphaTarget(0.2).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end", (e, d) => {
+        if (!e.active) graphSim.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      }))
+    .on("click", (e, d) => {
+      node.classed("sel", (n) => n === d);
+      renderGraphInfo(d);
+    });
+  node.append("title").text((d) => d.name);
+
+  // Label only what was actually retrieved — a catalog is mostly cold nodes, and
+  // labelling every one buries the signal. Cold names live in the tooltip/panel.
+  const labelled = data.nodes.filter((d) => d.picks > 0 || d.always);
+  const label = root.append("g").selectAll("text").data(labelled).join("text")
+    .attr("class", "glabel").attr("dy", "0.35em").text((d) => d.name);
+
+  const ticked = () => {
+    link.attr("x1", (d) => d.source.x).attr("y1", (d) => d.source.y)
+        .attr("x2", (d) => d.target.x).attr("y2", (d) => d.target.y);
+    node.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
+    label.attr("x", (d) => d.x + graphRadius(d) + 5).attr("y", (d) => d.y);
+  };
+
+  graphSim = d3.forceSimulation(data.nodes)
+    .force("link", d3.forceLink(data.edges).id((d) => d.name)
+      .distance((d) => 120 - Math.min(60, d.weight * 8)).strength(0.4))
+    // distanceMax matters: most of a catalog is never retrieved, so it's mostly
+    // isolates. Unbounded repulsion between them blows the layout past any
+    // viewport. forceX/Y gathers them instead of relying on forceCenter, which
+    // only recentres the mean and does nothing to contain the spread.
+    .force("charge", d3.forceManyBody().strength(-140).distanceMax(260))
+    .force("x", d3.forceX(w / 2).strength(0.06))
+    .force("y", d3.forceY(h / 2).strength(0.06))
+    // Labelled nodes claim extra room so their names don't collide; the cold
+    // majority stays tightly packed, so the overall footprint barely grows.
+    .force("collide", d3.forceCollide()
+      .radius((d) => graphRadius(d) + (d.picks > 0 || d.always ? 62 : 20)))
+    .on("tick", ticked);
+
+  // Settle headless, then paint once: opening the modal shows a stable layout
+  // instead of a few seconds of drift. Drag restarts the sim via alphaTarget.
+  graphSim.stop();
+  for (let i = 0; i < 300; i++) graphSim.tick();
+  ticked();
+
+  const b = root.node().getBBox();
+  if (b.width && b.height) {
+    const k = Math.min(w / b.width, h / b.height, 1) * 0.92;
+    svg.call(zoom.transform, d3.zoomIdentity
+      .translate(w / 2 - k * (b.x + b.width / 2), h / 2 - k * (b.y + b.height / 2))
+      .scale(k));
+  }
+}
+
+async function openGraph() {
+  const box = $("graphModal");
+  box.classList.add("show");
+  $("graphSummary").textContent = "Loading…";
+  renderGraphInfo(null);
+  graphEsc = (e) => { if (e.key === "Escape") closeGraph(); };
+  document.addEventListener("keydown", graphEsc);
+  box.onclick = (e) => { if (e.target === box) closeGraph(); };
+
+  let data;
+  try {
+    data = await api("/api/graph");
+  } catch (e) {
+    $("graphSummary").textContent = `Failed to load: ${e.message}`;
+    return;
+  }
+  const cold = data.nodes.filter((n) => !n.always && n.picks === 0).length;
+  $("graphSummary").textContent =
+    `${data.nodes.length} skills · ${data.edges.length} connections · ${data.turns} retrieval turns` +
+    (cold ? ` · ${cold} never retrieved` : "") +
+    (data.turns === 0 ? " — no retrieval history yet, so nothing is sized or connected" : "");
+
+  // Degrade to a plain list if the CDN didn't load, same as renderMarkdown.
+  if (!window.d3) {
+    $("graphInfo").innerHTML =
+      `<div class="gi-hint">Graph library unavailable.</div><dl>` +
+      data.nodes.map((n) => `<dt>${escapeHtml(n.name)}</dt><dd>${n.always ? "always" : n.picks + "×"}</dd>`).join("") +
+      `</dl>`;
+    return;
+  }
+  drawGraph(data);
+}
+
+function closeGraph() {
+  if (graphSim) { graphSim.stop(); graphSim = null; }
+  if (graphEsc) { document.removeEventListener("keydown", graphEsc); graphEsc = null; }
+  const box = $("graphModal");
+  box.onclick = null;
+  box.classList.remove("show");
+}
+
 // ---------- confirm modal ----------
 function confirmModal(message) {
   return new Promise((resolve) => {
@@ -1779,6 +2088,9 @@ $("logout").onclick = async () => {
   await fetch("/api/logout", { method: "POST" });
   location.reload();
 };
+
+$("graphBtn").onclick = openGraph;
+$("graphClose").onclick = closeGraph;
 
 $("consolidateBtn").onclick = async () => {
   const btn = $("consolidateBtn");
