@@ -620,14 +620,11 @@
     border-radius: 50%;
     display: inline-block;
   }
-  #graphModal .gm-legend i.sys { background: var(--c-sys); }
-  #graphModal .gm-legend i.act { background: var(--c-act); }
-  #graphModal .gm-legend i.arc { background: var(--c-arc); }
-  #graphModal .gm-legend i.cold {
-    background: var(--text-mute);
-    opacity: .35;
-    border: 1px dashed var(--text-3);
-  }
+  /* legend swatches mirror the design's materials, not the app's tier colors */
+  #graphModal .gm-legend i.sys { background: #554739; }
+  #graphModal .gm-legend i.act { background: #f8f1eb; }
+  #graphModal .gm-legend i.arc { background: #271bff; box-shadow: 0 0 5px #271bff; }
+  #graphModal .gm-legend i.cold { background: #f8f1eb; opacity: .28; }
   #graphClose {
     background: none;
     border: none;
@@ -639,8 +636,30 @@
   }
   #graphClose:hover { color: var(--text); }
   #graphModal .gm-body { display: flex; flex: 1 1 auto; min-height: 0; }
-  #graphSvg { flex: 1 1 auto; min-width: 0; display: block; cursor: grab; }
-  #graphSvg:active { cursor: grabbing; }
+  /* The 3D scene is its own world: the design's materials are lit for a dark
+     warm stage, so this pane stays dark in both app themes. */
+  #graphCanvas {
+    flex: 1 1 auto;
+    min-width: 0;
+    position: relative;
+    background: #0f0d0b;
+    cursor: grab;
+    overflow: hidden;
+  }
+  #graphCanvas:active { cursor: grabbing; }
+  #graphCanvas canvas { display: block; }
+  #graphEmpty {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 24px;
+    color: #8c8178;
+    font-size: 13px;
+  }
+  #graphEmpty.show { display: flex; }
   #graphInfo {
     flex: 0 0 260px;
     border-left: 1px solid var(--border);
@@ -662,22 +681,6 @@
   #graphInfo dd { margin: 0; font-family: var(--font-mono); font-size: 11px; }
   #graphInfo .gi-hint { color: var(--text-mute); font-style: italic; }
 
-  /* graph marks — colored via CSS so they follow the theme toggle for free */
-  .glink { stroke: var(--border-strong); }
-  .gnode { stroke: var(--surface); stroke-width: 1.5px; cursor: pointer; }
-  .gnode.sys { fill: var(--c-sys); }
-  .gnode.act { fill: var(--c-act); }
-  .gnode.arc { fill: var(--c-arc); }
-  .gnode.cold { opacity: .4; stroke: var(--text-3); stroke-dasharray: 2 2; }
-  .gnode.sel { stroke: var(--text); stroke-width: 2.5px; stroke-dasharray: none; }
-  .glabel {
-    fill: var(--text-2);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    pointer-events: none;
-    user-select: none;
-  }
-  .gempty { fill: var(--text-mute); font-family: var(--font-body); font-size: 13px; }
 
   /* login overlay */
   #login {
@@ -860,7 +863,17 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<!-- Skill map: d3-force-3d lays the graph out, three.js renders it in the
+     design's materials. Both are only needed for the Map modal. d3-force-3d
+     comes from the +esm build because its UMD leaves five d3 packages as
+     externals; this one bundles them. -->
+<script type="importmap">
+{"imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+  "d3-force-3d": "https://cdn.jsdelivr.net/npm/d3-force-3d@3.0.5/+esm"
+}}
+</script>
 
 <div id="apiKey">
   <div class="card">
@@ -918,15 +931,15 @@
         <div class="gm-sub" id="graphSummary"></div>
       </div>
       <div class="gm-legend">
-        <span><i class="sys"></i>system</span>
-        <span><i class="act"></i>active</span>
-        <span><i class="arc"></i>archive</span>
+        <span><i class="sys"></i>always loaded</span>
+        <span><i class="act"></i>picked</span>
+        <span><i class="arc"></i>co-activation</span>
         <span><i class="cold"></i>unpicked in window</span>
       </div>
       <button type="button" id="graphClose" title="Close (Esc)">×</button>
     </div>
     <div class="gm-body">
-      <svg id="graphSvg"></svg>
+      <div id="graphCanvas"><div id="graphEmpty"></div></div>
       <div id="graphInfo"></div>
     </div>
   </div>
@@ -1560,13 +1573,8 @@ function hideSkillPop() {
 // ---------- skill map ----------
 // Nodes are skills, edges are "picked in the same turn". Sizes come from how
 // often the picker retrieved a skill; dim/dashed nodes were never retrieved.
-let graphSim = null;
 let graphEsc = null;
 let graphData = null;
-
-function graphRadius(d) {
-  return 6 + Math.sqrt(d.picks) * 3;
-}
 
 // `turns.picked` post-dates most history, so pick counts cover a window, not
 // the lifetime. Every "0 picks" claim has to be scoped to it.
@@ -1579,7 +1587,7 @@ function graphWindow() {
 function renderGraphInfo(d) {
   const box = $("graphInfo");
   if (!d) {
-    box.innerHTML = `<div class="gi-hint">Click a skill to see its stats. Drag to reposition, scroll to zoom.</div>`;
+    box.innerHTML = `<div class="gi-hint">Click a skill to see its stats. Drag to orbit, scroll to zoom.</div>`;
     return;
   }
   const rows = [["tier", d.tier], ["size", `${d.chars} chars`]];
@@ -1600,91 +1608,6 @@ function renderGraphInfo(d) {
       : d.picks === 0
         ? `<p class="gi-hint" style="margin-top:14px">Not picked in ${graphWindow()}. Scores only exist for turns after the picker started recording them, so this is not a full history — an older skill may well have been retrieved before that.</p>`
         : "");
-}
-
-function drawGraph(data) {
-  const svg = d3.select("#graphSvg");
-  svg.selectAll("*").remove();
-  const box = $("graphSvg").getBoundingClientRect();
-  const w = box.width || 800;
-  const h = box.height || 600;
-
-  if (!data.nodes.length) {
-    svg.append("text").attr("class", "gempty").attr("x", w / 2).attr("y", h / 2)
-      .attr("text-anchor", "middle").text("No skills yet — chat a while and memory will grow.");
-    return;
-  }
-
-  const root = svg.append("g");
-  const zoom = d3.zoom().scaleExtent([0.2, 4]).on("zoom", (e) => root.attr("transform", e.transform));
-  svg.call(zoom);
-
-  const link = root.append("g").selectAll("line").data(data.edges).join("line")
-    .attr("class", "glink")
-    .attr("stroke-width", (d) => Math.min(6, Math.sqrt(d.weight)));
-
-  const tierClass = { system: "sys", active: "act", archive: "arc" };
-  const node = root.append("g").selectAll("circle").data(data.nodes).join("circle")
-    .attr("class", (d) => `gnode ${tierClass[d.tier] || "act"}${!d.always && d.picks === 0 ? " cold" : ""}`)
-    .attr("r", graphRadius)
-    .call(d3.drag()
-      .on("start", (e, d) => {
-        if (!e.active) graphSim.alphaTarget(0.2).restart();
-        d.fx = d.x; d.fy = d.y;
-      })
-      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on("end", (e, d) => {
-        if (!e.active) graphSim.alphaTarget(0);
-        d.fx = null; d.fy = null;
-      }))
-    .on("click", (e, d) => {
-      node.classed("sel", (n) => n === d);
-      renderGraphInfo(d);
-    });
-  node.append("title").text((d) => d.name);
-
-  // Label only what was actually retrieved — a catalog is mostly cold nodes, and
-  // labelling every one buries the signal. Cold names live in the tooltip/panel.
-  const labelled = data.nodes.filter((d) => d.picks > 0 || d.always);
-  const label = root.append("g").selectAll("text").data(labelled).join("text")
-    .attr("class", "glabel").attr("dy", "0.35em").text((d) => d.name);
-
-  const ticked = () => {
-    link.attr("x1", (d) => d.source.x).attr("y1", (d) => d.source.y)
-        .attr("x2", (d) => d.target.x).attr("y2", (d) => d.target.y);
-    node.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
-    label.attr("x", (d) => d.x + graphRadius(d) + 5).attr("y", (d) => d.y);
-  };
-
-  graphSim = d3.forceSimulation(data.nodes)
-    .force("link", d3.forceLink(data.edges).id((d) => d.name)
-      .distance((d) => 120 - Math.min(60, d.weight * 8)).strength(0.4))
-    // distanceMax matters: most of a catalog is never retrieved, so it's mostly
-    // isolates. Unbounded repulsion between them blows the layout past any
-    // viewport. forceX/Y gathers them instead of relying on forceCenter, which
-    // only recentres the mean and does nothing to contain the spread.
-    .force("charge", d3.forceManyBody().strength(-140).distanceMax(260))
-    .force("x", d3.forceX(w / 2).strength(0.06))
-    .force("y", d3.forceY(h / 2).strength(0.06))
-    // Labelled nodes claim extra room so their names don't collide; the cold
-    // majority stays tightly packed, so the overall footprint barely grows.
-    .force("collide", d3.forceCollide()
-      .radius((d) => graphRadius(d) + (d.picks > 0 || d.always ? 62 : 20)))
-    .on("tick", ticked);
-
-  // Settle headless, then paint once: opening the modal shows a stable layout
-  // instead of a few seconds of drift. Drag restarts the sim via alphaTarget.
-  graphSim.stop();
-  for (let i = 0; i < 300; i++) graphSim.tick();
-  ticked();
-
-  const b = root.node().getBBox();
-  if (b.width && b.height) {
-    const k = Math.min(w / b.width, h / b.height, 1) * 0.92;
-    svg.call(zoom.transform, d3.zoomIdentity
-      .translate(w / 2 - k * (b.x + b.width / 2), h / 2 - k * (b.y + b.height / 2))
-      .scale(k));
-  }
 }
 
 async function openGraph() {
@@ -1713,23 +1636,39 @@ async function openGraph() {
       : `scores from ${data.turns} of ${data.model_turns} turns${since}` +
         (cold ? ` · ${cold} unpicked in that window` : ""));
 
-  // Degrade to a plain list if the CDN didn't load, same as renderMarkdown.
-  if (!window.d3) {
+  const empty = $("graphEmpty");
+  empty.classList.toggle("show", !data.nodes.length);
+  if (!data.nodes.length) {
+    empty.textContent = "No skills yet — chat a while and memory will grow.";
+    return;
+  }
+
+  // Degrade to a plain list if the CDN or WebGL is unavailable, same spirit as
+  // renderMarkdown's fallback.
+  if (!window.renderMindMap) {
+    empty.classList.add("show");
+    empty.textContent = "3D view unavailable — skill stats are still listed on the right.";
     $("graphInfo").innerHTML =
-      `<div class="gi-hint">Graph library unavailable.</div><dl>` +
+      `<div class="gi-hint">Renderer unavailable.</div><dl>` +
       data.nodes.map((n) => `<dt>${escapeHtml(n.name)}</dt><dd>${n.always ? "always" : n.picks + "×"}</dd>`).join("") +
       `</dl>`;
     return;
   }
-  drawGraph(data);
+  try {
+    window.renderMindMap(data, renderGraphInfo);
+  } catch (e) {
+    empty.classList.add("show");
+    empty.textContent = `3D view failed: ${e.message}`;
+  }
 }
 
 function closeGraph() {
-  if (graphSim) { graphSim.stop(); graphSim = null; }
+  if (window.disposeMindMap) window.disposeMindMap();
   if (graphEsc) { document.removeEventListener("keydown", graphEsc); graphEsc = null; }
   const box = $("graphModal");
   box.onclick = null;
   box.classList.remove("show");
+  $("graphEmpty").classList.remove("show");
 }
 
 // ---------- confirm modal ----------
@@ -2157,6 +2096,297 @@ function flushSessionBeacon() {
 }
 
 init();
+</script>
+
+<!-- ---------- skill map: 3D renderer ----------
+     Materials, radius ratios and layout scale are lifted verbatim from
+     design-files/mind-map.{mtl,glb}. Base colours there are glTF LINEAR
+     values, so they are set with LinearSRGBColorSpace rather than as hex,
+     or they come out washed out. The design's signature is matte nodes and
+     emissive links; the dark stage exists so the emissive links read as
+     glowing and the near-black ink hub is legible against its violet ring. -->
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { forceSimulation, forceLink, forceManyBody, forceRadial, forceCenter }
+  from "d3-force-3d";
+
+const lin = (r, g, b) => new THREE.Color().setRGB(r, g, b, THREE.LinearSRGBColorSpace);
+
+// design-files/mind-map.glb, materials[] — baseColorFactor / metallic / rough
+const NODE_MATS = {
+  ink:   { color: lin(0.07421, 0.06301, 0.05127), metalness: 0.15, roughness: 0.45 },
+  clay:  { color: lin(0.33245, 0.27889, 0.21586), metalness: 0.10, roughness: 0.55 },
+  paper: { color: lin(0.97345, 0.94731, 0.92158), metalness: 0.00, roughness: 0.65 },
+};
+const LINK_MATS = {
+  violet:  { color: lin(0.15293, 0.10702, 1.0), emissive: lin(0.06848, 0.03820, 1.0), emissiveIntensity: 0.75 },
+  saffron: { color: lin(1.0, 0.38133, 0.02416), emissive: lin(1.0, 0.25415, 0.0), emissiveIntensity: 0.65 },
+  teal:    { color: lin(0.00913, 0.62396, 0.52712), emissive: lin(0.00478, 0.52100, 0.42327), emissiveIntensity: 0.60 },
+};
+
+// Design proportions: ink 0.1350, clay 0.0820, paper 0.0451, shell ~1.8.
+// Scaled so the hub is 12 units => ratios 3 : 1.82 : 1, shell 160.
+const R_HUB = 12, R_CLAY = 7.3, R_PAPER = 4.0, SHELL = 160;
+
+let ctx = null;   // live scene, torn down by disposeMindMap()
+
+const LABEL_PX = 13;   // on-screen label height, held constant by sizeLabels()
+
+// Labels are resized every frame from the camera distance (see sizeLabels), so
+// they stay LABEL_PX tall wherever the node sits. Plain world-space sprites
+// give the nearest node a banner and make everything across the ball illegible.
+function makeLabel(text) {
+  const pad = 8, font = "500 34px ui-monospace, Menlo, Consolas, monospace";
+  const m = document.createElement("canvas").getContext("2d");
+  m.font = font;
+  const w = Math.ceil(m.measureText(text).width) + pad * 2;
+  const h = 48;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const c = cv.getContext("2d");
+  c.font = font;
+  c.textBaseline = "middle";
+  c.fillStyle = "#f8f1eb";
+  c.shadowColor = "rgba(0,0,0,.85)";
+  c.shadowBlur = 6;
+  c.fillText(text, pad, h / 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthWrite: false,
+  }));
+  sp.userData.aspect = w / h;
+  return sp;
+}
+
+// Holds every label at LABEL_PX on screen, then drops any that would overlap
+// one already placed. `labels` must be ordered most-important first. The orbit
+// can bring any two nodes into line, so this has to run per frame — a fixed
+// vertical stagger only ever declutters the angle it was tuned for.
+function sizeLabels(labels, camera, viewW, viewH) {
+  const perPx = (2 * Math.tan((camera.fov * Math.PI) / 360)) / viewH;
+  const placed = [];
+  for (const sp of labels) {
+    const k = camera.position.distanceTo(sp.position) * perPx * LABEL_PX;
+    sp.scale.set(k * sp.userData.aspect, k, 1);
+    const p = sp.position.clone().project(camera);
+    if (p.z > 1) { sp.visible = false; continue; }          // behind the camera
+    const bw = LABEL_PX * sp.userData.aspect, bh = LABEL_PX * 1.6;
+    const cx = (p.x * 0.5 + 0.5) * viewW, cy = (-p.y * 0.5 + 0.5) * viewH;
+    const r = { l: cx - bw / 2, r: cx + bw / 2, t: cy - bh / 2, b: cy + bh / 2 };
+    const hit = placed.some((q) => r.l < q.r && q.l < r.r && r.t < q.b && q.t < r.b);
+    sp.visible = !hit;
+    if (!hit) placed.push(r);
+  }
+}
+
+window.renderMindMap = function (data, onSelect) {
+  window.disposeMindMap();
+  const host = document.getElementById("graphCanvas");
+  const w = host.clientWidth || 800, h = host.clientHeight || 600;
+
+  // --- layout: the synthetic hub anchors the ball the design is built around
+  const hub = { id: " hub", hub: true, picks: 0, fx: 0, fy: 0, fz: 0 };
+  const nodes = [hub, ...data.nodes.map((n) => ({ ...n, id: n.name }))];
+  const spine = data.nodes.filter((n) => n.always)
+    .map((n) => ({ source: hub.id, target: n.name, kind: "violet" }));
+  const co = data.edges.map((e) => ({
+    source: e.source, target: e.target, weight: e.weight,
+    kind: e.weight >= 2 ? "saffron" : "teal",
+  }));
+  const links = [...spine, ...co];
+
+  // The design nests by depth — branches sit around 0.53 of the outer radius,
+  // leaves out at the rim. Mapped onto retrieval: always-loaded skills form an
+  // inner core, picked skills a middle band, dormant memory the outer shell.
+  // A single radius for everything just makes a hollow ball with nothing in it.
+  const shellOf = (n) => n.always ? SHELL * 0.55 : n.picks > 0 ? SHELL * 0.78 : SHELL;
+
+  const sim = forceSimulation(nodes, 3)
+    .force("link", forceLink(links).id((d) => d.id).distance(70).strength(0.5))
+    .force("charge", forceManyBody().strength(-90).distanceMax(400))
+    // Gathers the unpicked majority onto the shell instead of letting repulsion
+    // scatter it; kept weak enough that co-activation links still pull clusters.
+    .force("radial", forceRadial(shellOf, 0, 0, 0).strength(0.32))
+    .force("center", forceCenter(0, 0, 0))
+    .stop();
+  for (let i = 0; i < 400; i++) sim.tick();
+
+  // --- scene
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f0d0b);
+  const camera = new THREE.PerspectiveCamera(50, w / h, 1, 8000);
+
+  // Frame the whole ball on open — the outer shell radius depends on the node
+  // count, so a fixed camera distance clips it for any decent-sized catalog.
+  const outer = nodes.reduce((m, n) => Math.max(m, Math.hypot(n.x, n.y, n.z)), 0) + R_PAPER * 3;
+  const halfFov = (camera.fov * Math.PI) / 360;
+  const dist = 1.15 * Math.max(outer / Math.tan(halfFov),
+                               outer / (Math.tan(halfFov) * camera.aspect));
+  camera.position.set(0, dist * 0.22, dist);
+  scene.fog = new THREE.Fog(0x0f0d0b, dist * 0.75, dist * 2.4);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(w, h);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+  host.appendChild(renderer.domElement);
+
+  scene.add(new THREE.HemisphereLight(0xfff2e0, 0x140f0a, 1.1));
+  const key = new THREE.DirectionalLight(0xfff4e6, 2.0);
+  key.position.set(1, 1.4, 1).multiplyScalar(SHELL);
+  scene.add(key);
+  const rim = new THREE.DirectionalLight(0x9fb4ff, 0.8);
+  rim.position.set(-1, -0.6, -1).multiplyScalar(SHELL);
+  scene.add(rim);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = R_HUB * 2;
+  controls.maxDistance = dist * 2.5;
+
+  // --- meshes
+  const sphere = new THREE.SphereGeometry(1, 32, 24);
+  const cyl = new THREE.CylinderGeometry(1, 1, 1, 8);
+  const mats = [], geos = [sphere, cyl];
+  const mkMat = (spec, extra) => {
+    const m = new THREE.MeshStandardMaterial({ ...spec, ...extra });
+    mats.push(m);
+    return m;
+  };
+  const matInk = mkMat(NODE_MATS.ink);
+  const matClay = mkMat(NODE_MATS.clay);
+  const matPaper = mkMat(NODE_MATS.paper);
+  const matPaperDim = mkMat(NODE_MATS.paper, { transparent: true, opacity: 0.3 });
+
+  const pickable = [], labels = [];
+  for (const n of nodes) {
+    let mat, r;
+    if (n.hub) { mat = matInk; r = R_HUB; }
+    else if (n.always) { mat = matClay; r = R_CLAY; }
+    else {
+      mat = n.picks > 0 ? matPaper : matPaperDim;
+      r = R_PAPER * (1 + Math.sqrt(n.picks) * 0.45);
+    }
+    const mesh = new THREE.Mesh(sphere, mat);
+    mesh.position.set(n.x, n.y, n.z);
+    mesh.scale.setScalar(r);
+    mesh.userData.node = n;
+    scene.add(mesh);
+    if (!n.hub) pickable.push(mesh);
+
+    if (n.hub || n.always || n.picks > 0) {
+      const lb = makeLabel(n.hub ? "memory" : n.name);
+      // stagger the offset: co-activated skills sit close together, so labels
+      // at a uniform height stack on top of each other
+      lb.position.set(n.x, n.y + r + 8 + (labels.length % 3) * 12, n.z);
+      lb.userData.rank = n.hub ? 1e6 : n.always ? 1e3 : n.picks;
+      scene.add(lb);
+      labels.push(lb);
+    }
+  }
+
+  // hub_ring — the design's violet torus, which is what keeps the near-black
+  // ink hub legible on a dark stage. A single ring disappears into a bar when
+  // the orbit brings it edge-on, so two crossed rings carry it from any angle.
+  const ringGeo = new THREE.TorusGeometry(R_HUB * 1.55, R_HUB * 0.085, 16, 96);
+  geos.push(ringGeo);
+  const ringMat = mkMat(LINK_MATS.violet);
+  const ring = new THREE.Group();
+  const rA = new THREE.Mesh(ringGeo, ringMat);
+  const rB = new THREE.Mesh(ringGeo, ringMat);
+  rB.rotation.set(Math.PI / 2, 0, 0);
+  ring.add(rA, rB);
+  ring.rotation.set(Math.PI * 0.36, 0, Math.PI * 0.12);
+  scene.add(ring);
+
+  const linkMat = {
+    violet: mkMat(LINK_MATS.violet),
+    saffron: mkMat(LINK_MATS.saffron),
+    teal: mkMat(LINK_MATS.teal),
+  };
+  const up = new THREE.Vector3(0, 1, 0);
+  for (const l of links) {
+    const a = new THREE.Vector3(l.source.x, l.source.y, l.source.z);
+    const b = new THREE.Vector3(l.target.x, l.target.y, l.target.z);
+    const len = a.distanceTo(b);
+    if (!len) continue;
+    const t = new THREE.Mesh(cyl, linkMat[l.kind]);
+    t.position.copy(a).add(b).multiplyScalar(0.5);
+    t.quaternion.setFromUnitVectors(up, b.clone().sub(a).normalize());
+    t.scale.set(0.9 + (l.weight || 1) * 0.5, len, 0.9 + (l.weight || 1) * 0.5);
+    scene.add(t);
+  }
+
+  // --- interaction
+  // hub first, then most-retrieved: sizeLabels drops collisions in this order,
+  // so the label that survives an overlap is always the more informative one.
+  labels.sort((a, b) => (b.userData.rank || 0) - (a.userData.rank || 0));
+
+  const ray = new THREE.Raycaster();
+  const ptr = new THREE.Vector2();
+  let selected = null, downAt = null;
+  const onDown = (e) => { downAt = { x: e.clientX, y: e.clientY }; };
+  const onUp = (e) => {
+    if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
+    const r = renderer.domElement.getBoundingClientRect();
+    ptr.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+    ptr.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+    ray.setFromCamera(ptr, camera);
+    const hit = ray.intersectObjects(pickable, false)[0];
+    if (!hit) return;
+    if (selected) selected.scale.setScalar(selected.userData.baseScale);
+    selected = hit.object;
+    selected.userData.baseScale = selected.scale.x;
+    selected.scale.setScalar(selected.scale.x * 1.5);
+    onSelect(selected.userData.node);
+  };
+  renderer.domElement.addEventListener("pointerdown", onDown);
+  renderer.domElement.addEventListener("pointerup", onUp);
+
+  const ro = new ResizeObserver(() => {
+    const nw = host.clientWidth, nh = host.clientHeight;
+    if (!nw || !nh) return;
+    camera.aspect = nw / nh;
+    camera.updateProjectionMatrix();
+    renderer.setSize(nw, nh);
+  });
+  ro.observe(host);
+
+  let raf = 0;
+  const loop = () => {
+    raf = requestAnimationFrame(loop);
+    ring.rotation.z += 0.0016;
+    controls.update();
+    sizeLabels(labels, camera, host.clientWidth || w, host.clientHeight || h);
+    renderer.render(scene, camera);
+  };
+  loop();
+
+  ctx = { host, renderer, controls, ro, scene, geos, mats, onDown, onUp,
+          stop: () => cancelAnimationFrame(raf), nodeCount: nodes.length,
+          linkCount: links.length, camera, labels, sizeLabels };
+  window.__mindmap = ctx;   // test hook
+};
+
+window.disposeMindMap = function () {
+  if (!ctx) return;
+  ctx.stop();
+  ctx.ro.disconnect();
+  ctx.renderer.domElement.removeEventListener("pointerdown", ctx.onDown);
+  ctx.renderer.domElement.removeEventListener("pointerup", ctx.onUp);
+  ctx.controls.dispose();
+  ctx.scene.traverse((o) => { if (o.isSprite) { o.material.map?.dispose(); o.material.dispose(); } });
+  ctx.geos.forEach((g) => g.dispose());
+  ctx.mats.forEach((m) => m.dispose());
+  ctx.renderer.dispose();
+  ctx.renderer.domElement.remove();
+  ctx = null;
+  window.__mindmap = null;
+};
 </script>
 </body>
 </html>

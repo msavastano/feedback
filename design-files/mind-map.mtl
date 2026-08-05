@@ -1,0 +1,37 @@
+# Exported by three-d-stage
+newmtl ink
+Kd 0.0742 0.0630 0.0513
+Ks 0.2000 0.2000 0.2000
+Ns 110
+d 1.0000
+
+newmtl clay
+Kd 0.3325 0.2789 0.2159
+Ks 0.2000 0.2000 0.2000
+Ns 90
+d 1.0000
+
+newmtl violet_link
+Kd 0.1529 0.1070 1.0000
+Ks 0.2000 0.2000 0.2000
+Ns 140
+d 1.0000
+
+newmtl paper
+Kd 0.9734 0.9473 0.9216
+Ks 0.2000 0.2000 0.2000
+Ns 70
+d 1.0000
+
+newmtl saffron_link
+Kd 1.0000 0.3813 0.0242
+Ks 0.2000 0.2000 0.2000
+Ns 140
+d 1.0000
+
+newmtl teal_link
+Kd 0.0091 0.6240 0.5271
+Ks 0.2000 0.2000 0.2000
+Ns 140
+d 1.0000
+
