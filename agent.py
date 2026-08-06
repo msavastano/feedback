@@ -627,13 +627,28 @@ def _chat_respond(
 def _parse_picks(raw, valid: set[str]) -> list[tuple[str, float]]:
     """Normalise the picker's JSON into [(name, score)] sorted best-first.
 
-    Tolerates bare strings as well as {"name", "score"} objects: a model that
-    ignores the scored format still yields usable picks (scored 1.0) instead of
+    Tolerates top-level dict wrappers (e.g. {"picks": [...]}, {"skills": [...]}),
+    single dict items, bare strings, as well as {"name", "score"} objects: a model
+    that wraps or ignores the scored format still yields usable picks instead of
     silently loading nothing. Unknown names are dropped and logged — a
     hallucinated skill name should be visible, not invisible.
     """
+    if isinstance(raw, dict):
+        for key in ("picks", "skills", "candidates", "results"):
+            if key in raw and isinstance(raw[key], list):
+                raw = raw[key]
+                break
+        else:
+            if "name" in raw:
+                raw = [raw]
+            else:
+                for val in raw.values():
+                    if isinstance(val, list):
+                        raw = val
+                        break
     if not isinstance(raw, list):
         return []
+    valid_map = {normalize_skill_name(v): v for v in valid}
     out: list[tuple[str, float]] = []
     seen: set[str] = set()
     dropped: list[str] = []
@@ -646,15 +661,17 @@ def _parse_picks(raw, valid: set[str]) -> list[tuple[str, float]]:
             continue
         if not isinstance(name, str):
             continue
-        if name not in valid:
+        norm_name = normalize_skill_name(name)
+        if norm_name not in valid_map:
             dropped.append(name)
             continue
-        if name in seen:  # model repeated itself; don't load the body twice
+        canonical_name = valid_map[norm_name]
+        if canonical_name in seen:  # model repeated itself; don't load the body twice
             continue
-        seen.add(name)
+        seen.add(canonical_name)
         if not isinstance(score, (int, float)) or isinstance(score, bool):
             score = 1.0
-        out.append((name, max(0.0, min(1.0, float(score)))))
+        out.append((canonical_name, max(0.0, min(1.0, float(score)))))
     if dropped:
         print(f"[pick dropped] not in catalog: {', '.join(dropped)}")
     out.sort(key=lambda t: -t[1])

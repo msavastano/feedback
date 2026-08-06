@@ -30,6 +30,11 @@ def test():
         VALID,
     ) == [("tech-stack", 1.0)]
 
+    # dict wrappers & single objects: unwrapped cleanly
+    assert _parse_picks({"picks": [{"name": "tech-stack", "score": 0.7}]}, VALID) == [("tech-stack", 0.7)]
+    assert _parse_picks({"skills": ["user-profile"]}, VALID) == [("user-profile", 1.0)]
+    assert _parse_picks({"name": "User-Profile", "score": 0.95}, VALID) == [("user-profile", 0.95)]
+
     # garbage in, empty out — never raises
     assert _parse_picks(None, VALID) == []
     assert _parse_picks("tech-stack", VALID) == []
