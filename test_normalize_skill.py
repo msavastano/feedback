@@ -17,6 +17,13 @@ def test():
     assert normalize_skill_name("---") == "---"
     assert normalize_skill_name("!!!") == "!!!"
 
+    # Test base64 pruning
+    from google.genai import types
+    from agent import _prune_history_base64
+    hist = [types.Content(role="user", parts=[types.Part(text="Image: data:image/png;base64," + "A"*150)])]
+    pruned = _prune_history_base64(hist)
+    assert "[data-url-truncated]" in pruned[0].parts[0].text
+
     print("normalize_skill_name unit tests ok")
 
 

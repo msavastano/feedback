@@ -154,6 +154,24 @@ def _window_history(history: list, cap: int = HISTORY_TURN_CAP) -> list:
     return history[-cap:]
 
 
+BASE64_DATA_URL_RE = re.compile(r'data:[a-zA-Z0-9/+-]+;base64,[a-zA-Z0-9+/=]{100,}')
+
+
+def _prune_history_base64(history: list[types.Content]) -> list[types.Content]:
+    """Prune large embedded base64 data URLs in history turns to conserve context tokens."""
+    pruned: list[types.Content] = []
+    for c in history:
+        new_parts = []
+        for p in (c.parts or []):
+            if p.text and "data:" in p.text and ";base64," in p.text:
+                cleaned_text = BASE64_DATA_URL_RE.sub("[data-url-truncated]", p.text)
+                new_parts.append(types.Part(text=cleaned_text))
+            else:
+                new_parts.append(p)
+        pruned.append(types.Content(role=c.role, parts=new_parts))
+    return pruned
+
+
 # ---------- user context ----------
 
 def validate_user_id(user_id: str) -> str:
@@ -227,6 +245,7 @@ class Skill:
         fm = yaml.safe_dump(
             {"name": self.name, "description": self.description},
             sort_keys=False,
+            allow_unicode=True,
         ).strip()
         return f"---\n{fm}\n---\n\n{self.body.strip()}\n"
 
@@ -847,6 +866,7 @@ def respond(
             "or spreadsheet data). They are included with the message — read "
             "them and answer based on their actual content."
         )
+    history = _prune_history_base64(history)
     return _chat_respond(
         clients,
         model,
@@ -1451,13 +1471,20 @@ def apply_edits(ctx: UserCtx, edits: list[dict]) -> list[str]:
         desc = e.get("description", "")
         body = e.get("body", "")
         tier = e.get("tier", "active")
-        if not name or not body:
+        op = e.get("op", "write")
+        if not name:
+            continue
+        if op == "delete":
+            if delete_skill(ctx, name):
+                applied.append(f"delete[{tier}] -> {normalize_skill_name(name)}")
+            continue
+        if not body:
             continue
         body = _strip_leading_frontmatter(body)
         if not body.strip():
             continue
         canonical = write_skill(ctx, name, desc, body, tier=tier)
-        applied.append(f"{e.get('op', 'write')}[{tier}] -> {canonical}")
+        applied.append(f"{op}[{tier}] -> {canonical}")
     return applied
 
 

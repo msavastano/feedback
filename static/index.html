@@ -1608,6 +1608,33 @@ function renderGraphInfo(d) {
       : d.picks === 0
         ? `<p class="gi-hint" style="margin-top:14px">Not picked in ${graphWindow()}. Scores only exist for turns after the picker started recording them, so this is not a full history — an older skill may well have been retrieved before that.</p>`
         : "");
+
+  const viewBtn = document.createElement("button");
+  viewBtn.className = "btn btn-sm";
+  viewBtn.style.cssText = "margin-top:14px; width:100%; border:1px solid var(--border); background:var(--surface-container); color:var(--text); padding:6px 10px; border-radius:var(--r-btn); cursor:pointer;";
+  viewBtn.textContent = "View Skill Body";
+  viewBtn.onclick = async () => {
+    viewBtn.disabled = true;
+    viewBtn.textContent = "Loading...";
+    try {
+      const s = await api(`/api/skill/${encodeURIComponent(d.name)}`);
+      let bodyDiv = $("graphSkillBody");
+      if (!bodyDiv) {
+        bodyDiv = document.createElement("pre");
+        bodyDiv.id = "graphSkillBody";
+        bodyDiv.style.cssText = "margin-top:12px; padding:10px; background:var(--surface-dark, #171717); color:#f1f1f1; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:220px; overflow-y:auto; border-radius:4px;";
+        box.appendChild(bodyDiv);
+      }
+      bodyDiv.textContent = s.body || "(empty body)";
+      viewBtn.disabled = false;
+      viewBtn.textContent = "Hide Skill Body";
+      viewBtn.onclick = () => { bodyDiv.remove(); renderGraphInfo(d); };
+    } catch (e) {
+      viewBtn.disabled = false;
+      viewBtn.textContent = "Failed to load";
+    }
+  };
+  box.appendChild(viewBtn);
 }
 
 async function openGraph() {
