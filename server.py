@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from agent import (
     ALLOWED_MODELS,
+    normalize_skill_name,
     MODEL,
     PRICING,
     THINKING_CAPABLE_MODELS,
@@ -342,8 +343,9 @@ def api_skills(ctx: UserCtx = Depends(_ctx)) -> list[dict]:
 
 @app.get("/api/skill/{name}")
 def api_skill_get(name: str, ctx: UserCtx = Depends(_ctx)) -> dict:
+    canonical = normalize_skill_name(name)
     for s in load_skills(ctx):
-        if s.name == name:
+        if s.name == canonical or s.name == name:
             return {
                 "name": s.name,
                 "tier": s.tier,

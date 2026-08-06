@@ -28,7 +28,7 @@ import anthropic
 from google import genai
 from google.genai import errors, types
 
-from store import SessionStore, SkillStore, UserStore
+from store import SessionStore, SkillStore, UserStore, normalize_skill_name
 
 MODEL = "gemini-3.6-flash"
 # Claude Haiku 4.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
@@ -250,11 +250,13 @@ def write_skill(
     """Insert-or-update a skill. Returns the canonical name (used as identifier)."""
     if tier not in TIERS:
         tier = "active"
+    name = normalize_skill_name(name)
     return SkillStore.upsert(ctx.user_id, name, description, body, tier=tier)
 
 
 def delete_skill(ctx: UserCtx, name: str) -> bool:
     """Delete a skill by name. Returns True if a row was removed."""
+    name = normalize_skill_name(name)
     return SkillStore.delete(ctx.user_id, name)
 
 

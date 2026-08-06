@@ -129,6 +129,13 @@ class UserStore:
 
 # ---------- skill store ----------
 
+def normalize_skill_name(name: str) -> str:
+    """Normalize a skill name into a clean, lowercase slug identifier."""
+    if not name:
+        return name
+    s = re.sub(r'[^a-zA-Z0-9_-]+', '-', name).strip('-').lower()
+    return s or name
+
 # Row shape returned by load_all: dict with tier/name/description/body keys.
 
 class SkillStore:
@@ -165,6 +172,7 @@ class SkillStore:
     ) -> str:
         """Insert-or-update a skill. Returns the canonical name."""
         _check_user_id(user_id)
+        name = normalize_skill_name(name)
         if tier not in ("system", "active", "archive"):
             tier = "active"
         with get_pool().connection() as conn:
@@ -201,6 +209,7 @@ class SkillStore:
     @staticmethod
     def delete(user_id: str, name: str) -> bool:
         _check_user_id(user_id)
+        name = normalize_skill_name(name)
         with get_pool().connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
