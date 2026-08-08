@@ -167,6 +167,41 @@ class SkillStore:
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
+    def search_bodies(user_id: str, terms: list[str], limit: int = 3) -> list[str]:
+        """Skill names whose text matches ANY of `terms`, best match first.
+
+        Fallback for the picker, which only ever sees names and descriptions: a
+        fact filed inside a skill about something else is invisible to it, and
+        the description becomes a single point of failure for that fact. This
+        reads the bodies. System tier is excluded — it loads unconditionally.
+
+        # ponytail: seq scan with the tsvector computed per row. A user's
+        # catalog is a few dozen small rows, so this is cheaper than a stored
+        # tsv column + GIN index + migration. Add those if a catalog grows
+        # enough to feel it.
+        """
+        _check_user_id(user_id)
+        if not terms:
+            return []
+        query = " | ".join(terms)
+        with get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT name
+                    FROM skills,
+                         to_tsquery('english', %s) AS q,
+                         to_tsvector('english',
+                             name || ' ' || description || ' ' || body) AS tsv
+                    WHERE user_id = %s AND tier <> 'system' AND tsv @@ q
+                    ORDER BY ts_rank(tsv, q) DESC
+                    LIMIT %s
+                    """,
+                    (query, user_id, limit),
+                )
+                return [r[0] for r in cur.fetchall()]
+
+    @staticmethod
     def upsert(
         user_id: str, name: str, description: str, body: str, tier: str = "active"
     ) -> str:

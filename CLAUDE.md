@@ -90,6 +90,8 @@ FROM turns t, jsonb_each_text(t.picked->'scores') k
 WHERE t.user_id = 'alice'
 GROUP BY 1 ORDER BY picks DESC;
 ```
+2b. **fallback** — the picker only ever sees names and descriptions, so a fact filed inside a skill about another subject is invisible to it and the description becomes that fact's single point of failure. When `pick_skills()` returns **nothing**, `fallback_body_picks()` runs one Postgres full-text OR-query over `name || description || body` (`SkillStore.search_bodies`, ranked by `ts_rank`, top 3, system tier excluded) and uses the hits instead. No LLM call. `_search_terms()` reduces the prompt to ≤8 distinctive alphanumeric tokens — alphanumeric because the terms are interpolated into a `to_tsquery`, where a stray `&`/`|`/`:`/`!` would be a syntax error, not a miss (see [test_search_terms.py](test_search_terms.py)). Fallback hits carry `FALLBACK_SCORE = 0.1` so they're distinguishable from real picker confidences everywhere scores surface. Any exception is caught and logged — a search miss must never cost the user their turn.
+
 3. **archive** — for each picked archive skill, `pick_archive_sections()` asks the model which `##` sections to load (second cheap call per archive hit).
 4. **respond** — `respond()` builds the prompt with system bodies + active bodies + archive excerpts, plus a windowed history (`HISTORY_TURN_CAP`), and calls Gemini with `google_search` grounding enabled.
 5. **persist** — append user + model turns to `sessions/<sid>.jsonl`.
@@ -125,7 +127,11 @@ Each chat creates `sessions/<16-hex>.jsonl` (one JSON record per line). On `/api
 
 ### Consolidation (offline)
 
-`consolidate()` folds all `session-*` active skills into one `sessions-archive-<timestamp>` archive skill (one `##` section per session, headed `<name> — <description>` so `pick_archive_sections` can match on topic, not timestamp). **Non-destructive**: writes to `skills.consolidated/` side path, leaves the live tree untouched. Idempotent via `.consolidated` marker comparing input file mtimes. Manual swap required.
+`consolidate()` folds all `session-*` active skills into one `sessions-archive-<timestamp>` archive skill (one `##` section per session, headed `<name> — <description>` so `pick_archive_sections` can match on topic, not timestamp), then deletes the originals from the live store.
+
+**Lossless despite the delete**: the fold is verbatim string concatenation of `s.body` — no LLM call, so nothing is summarized away — and `SkillStore.delete` snapshots each pre-image into `skill_versions` first. Idempotent because retired sessions no longer match the `active` + `session-*` filter. Each run mints a *new* timestamped archive skill rather than extending the previous one, so the archive tier grows by one skill per run (49 of them on the main user as of Aug 2026).
+
+(Pre-Postgres this wrote to a `skills.consolidated/` side path and required a manual swap. That path is gone; `--dry-run` is the preview now.)
 
 ### Auth (single seam)
 
@@ -176,3 +182,13 @@ Every Gemini call passes through `_log_usage()` which prints `[tokens <label>] i
 - Skill `body` is markdown only — no embedded frontmatter. `_strip_leading_frontmatter()` is a safety net, not an excuse.
 - Active tier holds many small skills (`user-profile`, `tech-stack`, `project-<name>`); see `EDIT_INSTRUCTIONS` in [agent.py](agent.py) for the prompt that governs this.
 - `skills.old/` is legacy and not loaded.
+
+## Memory hygiene rules (why they're in the prompts)
+
+Three rules in the writer prompts exist to counter documented failure modes of self-editing filesystem memory ([arXiv 2607.26637](https://arxiv.org/abs/2607.26637), which studies exactly this store class). Don't relax them without re-reading that:
+
+- **Supersession** (`EDIT_INSTRUCTIONS`) — when a new fact contradicts a stored one, retire the old line with a date and add the new one; never silently overwrite. Counters "stale facts standing as live traits", worst in the `system` tier, which is injected every turn with no relevance check. `reflect_and_edit` passes `TODAY` into the prompt so relative phrases ("yesterday") resolve before storage. Baseline when this landed: 4 of 107 bodies carried any ISO date.
+- **Keep every fact** (`SESSION_INSTRUCTIONS`) — the session rollup *replaces* the transcript as memory, so the bullet count is a target, not a budget. Counters silent condensation, the paper's one degenerate-by-default behavior (measured at ~2x correctness loss on one benchmark). Tightening wording is fine; dropping a name/number/date/decision is not.
+- **Delete is for containers, never facts** (`EDIT_INSTRUCTIONS`) — `apply_edits` has always handled `op="delete"`, but the prompt didn't document it, so it was dead code and the store could only grow. It's now documented, scoped to redundant skills whose content was merged elsewhere.
+
+Store shape as of Aug 2026 (main user): 107 skills / 129 KB — 2 system, 52 active, 53 archive; 58 subject skills, 49 `sessions-archive-*`. Note the subject names encode a taxonomy the flat namespace can't hold (`interest-sports-rules-fifa`, `-fifa-subs`, `-fifa-tie-breakers`). Byte size is comparable to the paper's curated stores; file count is ~40x theirs.

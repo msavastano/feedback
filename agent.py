@@ -697,6 +697,56 @@ def _parse_picks(raw, valid: set[str]) -> list[tuple[str, float]]:
     return out
 
 
+# Filtered before the OR-query so a prompt of common words doesn't match every
+# skill. Postgres' english dictionary strips these too, but an all-stopword
+# tsquery is empty and matches nothing — cheaper to notice here.
+_SEARCH_STOPWORDS = frozenset(
+    "the and but for was were you your yours our ours they them their this that "
+    "these those what when where which who whom why how did does done can could "
+    "will would shall should may might must have has had been being are its "
+    "with from into about over under again more most some such only own same "
+    "than too very just now then here there all any both each few nor not off "
+    "once out own too say said tell told get got give gave know knew think "
+    "thought want wanted like liked make made take took come came".split()
+)
+
+
+def _search_terms(prompt: str, cap: int = 8) -> list[str]:
+    """Distinctive lowercase tokens from a prompt, for `SkillStore.search_bodies`.
+
+    Alphanumerics only: the result is interpolated into a `to_tsquery` OR-query,
+    so punctuation that tsquery would parse as an operator must not survive."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for w in re.findall(r"[A-Za-z0-9]{3,}", prompt.lower()):
+        if w in _SEARCH_STOPWORDS or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+        if len(out) >= cap:
+            break
+    return out
+
+
+# Score stamped on fallback hits. NOT a model confidence like the picker's — it
+# marks "matched by body text, not chosen by the model" wherever scores surface
+# (UI badges, turns.picked, the graph).
+FALLBACK_SCORE = 0.1
+
+
+def fallback_body_picks(
+    ctx: UserCtx, prompt: str, skills: list[Skill]
+) -> list[tuple[str, float]]:
+    """Text-match skills the picker didn't return. Best match first."""
+    known = {s.name for s in skills if s.tier != "system"}
+    try:
+        names = SkillStore.search_bodies(ctx.user_id, _search_terms(prompt))
+    except Exception as e:  # a search miss must never cost the user their turn
+        print(f"[fallback search failed] {e}")
+        return []
+    return [(n, FALLBACK_SCORE) for n in names if n in known]
+
+
 def pick_skills(
     clients: Clients,
     prompt: str,
@@ -1268,6 +1318,28 @@ DEDUPLICATION (CRITICAL):
 - For archive updates, preserve existing ## sections; append new ## sections only
   for genuinely new topics.
 
+SUPERSESSION (CRITICAL):
+A merge that silently overwrites is the main way this memory goes wrong: a stale
+fact left un-dated reads as a live trait forever, and a fact deleted on update
+cannot be recovered from the body.
+- When new information CONTRADICTS a stored fact, do NOT overwrite it. Retire the
+  old line and add the new one, both dated:
+    - Works at Acme (until 2026-08-08)
+    - Works at Globex (since 2026-08-08)
+  A superseded fact becomes a past entry; it does not vanish.
+- Simple corrections ("I meant Tuesday, not Monday") ARE overwrites — fix in place.
+  The rule above is for facts that were true and stopped being true.
+- Anchor time-dependent facts to absolute dates. Resolve "yesterday", "last week",
+  "the day before" against TODAY (given below) BEFORE storing — a relative phrase
+  stored raw becomes ambiguous the moment it is read back.
+- A fact with no date of its own carries the date it was recorded.
+
+DELETION:
+- op="delete" (with just "name") removes a whole skill. Use it ONLY to clear a
+  redundant container: a duplicate skill whose content you just merged into
+  another, or a skill whose entire subject is now covered elsewhere.
+- NEVER use delete to drop a fact. Facts follow SUPERSESSION above.
+
 BODY FORMAT (CRITICAL):
 - The "body" field is markdown ONLY. It must NOT contain a YAML frontmatter block.
 - Do NOT start the body with "---". Do NOT include "name:" or "description:" lines
@@ -1283,8 +1355,9 @@ BODY FORMAT (CRITICAL):
     - bullet
 
 Return ONLY JSON, no prose:
-{"edits": [{"op": "create"|"update", "tier": "system"|"active"|"archive",
+{"edits": [{"op": "create"|"update"|"delete", "tier": "system"|"active"|"archive",
   "name": "...", "description": "...", "body": "..."}]}
+(op="delete" needs only "name"; "description"/"body" are ignored.)
 
 Empty edits array ONLY if the exchange is pure small talk with zero new facts.
 """
@@ -1339,6 +1412,9 @@ def reflect_and_edit(
         f"scoped_body_chars={scoped_body_chars}"
     )
     user = (
+        # The supersession rule resolves "yesterday"/"last week" to real dates and
+        # stamps retired facts, so the writer needs a clock.
+        f"TODAY: {datetime.now().date().isoformat()}\n\n"
         f"Existing skills:\n{inventory}\n\n"
         f"Existing bodies (for update merges):\n{existing_bodies or '(none)'}\n\n"
         f"User prompt:\n{prompt}\n\nAssistant answer:\n{answer}\n\n"
@@ -1356,7 +1432,17 @@ def reflect_and_edit(
 SESSION_INSTRUCTIONS = """\
 Summarize this chat session as a skill memory for future sessions.
 Capture: topics discussed, decisions made, user state/mood, open threads, anything
-worth remembering next time. 3-7 tight bullets. No filler.
+worth remembering next time. Tight bullets, no filler.
+
+KEEP EVERY FACT. This summary REPLACES the transcript as memory — whatever you leave
+out is gone. You cannot know which detail a future question will need.
+- Drop only pure conversational filler: greetings, acknowledgements, chit-chat that
+  carries no fact.
+- NEVER drop a concrete detail — a name, number, date, place, preference, decision,
+  or open question — on the assumption it is unimportant.
+- Tightening the WORDING is fine and encouraged. Dropping facts is not.
+- Aim for 3-7 bullets, but go longer when the session earned it. A dense session
+  gets a long summary; do not compress to hit a count.
 
 Return ONLY JSON:
 {"description": "one-line hook for matching future prompts", "body": "markdown bullets"}
@@ -1626,6 +1712,16 @@ def run_turn_events(
     scored = pick_skills(
         clients, persisted_prompt, skills, model=ctx.model, history_snippet=recent
     )
+    if not scored:
+        # The picker only ever saw names and descriptions. Before concluding the
+        # store has nothing, read the bodies — a fact filed inside a skill about
+        # another subject is invisible to a description-only match.
+        scored = fallback_body_picks(ctx, persisted_prompt, skills)
+        if scored:
+            yield {
+                "stage": "pick",
+                "msg": f"No description matched; found {len(scored)} by body text…",
+            }
     scores = dict(scored)
     by_name = {s.name: s for s in skills}
     # Keep the picker's ranking — indexing by its order, not the catalog's.
