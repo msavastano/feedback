@@ -30,14 +30,14 @@ from google.genai import errors, types
 
 from store import SessionStore, SkillStore, UserStore, normalize_skill_name
 
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-3.7-flash"
 # Claude Haiku 4.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
 # web search + manual extended thinking (budget_tokens) — no image generation,
 # no code execution.
 CLAUDE_MODEL = "claude-haiku-4-5"
 CLAUDE_SONNET_MODEL = "claude-sonnet-5"  # Sonnet 5 (Anthropic). Same v1 path as Haiku.
 ALLOWED_MODELS = (
-    "gemini-3.6-flash",
+    "gemini-3.7-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     CLAUDE_MODEL,
@@ -52,7 +52,8 @@ ALLOWED_MODELS = (
 # ponytail: hand-kept map, not a startup fetch — swap for an aggregator pull only
 # if these go stale faster than we edit this file.
 PRICING = {
-    "gemini-3.6-flash":      {"input": 1.50, "output": 7.50},
+    # intro rate, live now; reverts to 1.50/7.50 on 2027-01-01
+    "gemini-3.7-flash":      {"input": 0.75, "output": 3.75},
     "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
     "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
     CLAUDE_MODEL:            {"input": 1.00, "output": 5.00},   # claude-haiku-4-5
@@ -74,7 +75,7 @@ IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 # flash-lite mis-emits a bare function_call instead of running code. Mirror the
 # levels AI Studio's generated code pairs with each model.
 THINKING_LEVELS = {
-    "gemini-3.6-flash": types.ThinkingLevel.MEDIUM,
+    "gemini-3.7-flash": types.ThinkingLevel.MEDIUM,
     "gemini-3.5-flash-lite": types.ThinkingLevel.MEDIUM,
     "gemini-3.1-flash-lite": types.ThinkingLevel.MEDIUM,
 }
