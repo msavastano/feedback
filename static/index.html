@@ -361,21 +361,70 @@
     border-radius: var(--r-card);
     max-width: 720px;
   }
-  .pending .spinner {
+  .spinner {
     width: 12px;
     height: 12px;
+    flex: 0 0 auto;
     border: 2px solid var(--border-strong);
     border-top-color: var(--text);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
-  .pending .trace {
-    font-size: 11px;
-    color: var(--text-mute);
-    margin-top: 4px;
-    white-space: pre;
-  }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* Pipeline steps — a disclosure inside the agent message it belongs to.
+     Open while the turn runs, collapsed to one line once the answer lands, so
+     the trace stays on screen instead of being thrown away with the row. */
+  .steps-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    margin: 0 0 2px;
+    font: inherit;
+    font-size: 11px;
+    color: var(--text-3);
+    cursor: pointer;
+  }
+  .steps-toggle:hover { color: var(--text); }
+  .steps-toggle .spinner { width: 10px; height: 10px; }
+  .steps-toggle .live {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .steps-toggle .chev {
+    flex: 0 0 auto;
+    color: var(--text-mute);
+    transition: transform 0.15s ease;
+  }
+  .msg.steps-open .steps-toggle .chev { transform: rotate(90deg); }
+  .steps {
+    display: none;
+    flex-direction: column;
+    gap: 1px;
+    border-left: 2px solid var(--border-strong);
+    padding: 2px 0 2px 12px;
+    margin: 4px 0 10px 3px;
+  }
+  .msg.steps-open .steps { display: flex; }
+  .step {
+    display: grid;
+    /* minmax(0,1fr) is the fix: long archive names wrap in the column instead
+       of pushing the row past the message width. */
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    column-gap: 10px;
+    align-items: baseline;
+  }
+  .step .stage { font-family: var(--font-mono); font-size: 10px; color: var(--text-mute); }
+  .step .stage.archive { color: var(--c-arc); }
+  .step .stage.reflect { color: var(--c-act); }
+  .step .smsg { font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
+  .step.now .smsg { color: var(--text); }
+  .step .dur { font-size: 10px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
   form#composer {
     border-top: 1px solid var(--border);
     padding: 10px 16px;
@@ -1717,23 +1766,78 @@ function confirmModal(message) {
   });
 }
 
+const CHEV = '<svg class="chev" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 2.5 L8 6 L4.5 9.5"/></svg>';
+
+// The agent message for the turn about to run: it starts as the live pipeline
+// trace and grows the answer into itself, so nothing is thrown away and nothing
+// jumps when the answer lands. finish()/fail() replace appendMessage("agent").
 function createPending() {
   const div = document.createElement("div");
-  div.className = "pending";
+  div.className = "msg agent steps-open";
   div.innerHTML = `
-    <div class="spinner"></div>
-    <div>
-      <div class="status">Starting…</div>
-      <div class="trace"></div>
-    </div>`;
+    <div class="role">agent</div>
+    <button type="button" class="steps-toggle" aria-expanded="true">
+      <span class="spinner"></span><span class="live">Starting…</span>
+    </button>
+    <div class="steps"></div>
+    <div class="body"></div>`;
+  const toggle = div.querySelector(".steps-toggle");
+  const steps = div.querySelector(".steps");
+  const body = div.querySelector(".body");
+  toggle.onclick = () => {
+    const open = div.classList.toggle("steps-open");
+    toggle.setAttribute("aria-expanded", String(open));
+  };
   $("chat").appendChild(div);
   $("chat").scrollTop = $("chat").scrollHeight;
-  const trace = [];
+
+  const t0 = performance.now();
+  let mark = t0;
+  let cur = null;
+  // Close off the running step: stamp how long it took, drop the highlight.
+  const stamp = () => {
+    if (!cur) return;
+    cur.querySelector(".dur").textContent = `${((performance.now() - mark) / 1000).toFixed(1)}s`;
+    cur.classList.remove("now");
+    cur = null;
+    mark = performance.now();
+  };
+  const summarize = (label) => {
+    stamp();
+    const n = steps.children.length;
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    toggle.innerHTML = `${CHEV}<span class="live"></span>`;
+    toggle.querySelector(".live").textContent =
+      `${label} ${secs}s · ${n} step${n === 1 ? "" : "s"}`;
+  };
   return {
-    update(msg) {
-      div.querySelector(".status").textContent = msg;
-      trace.push(msg);
-      div.querySelector(".trace").textContent = trace.slice(0, -1).join(" → ");
+    update(stage, msg) {
+      stamp();
+      const row = document.createElement("div");
+      row.className = "step now";
+      row.innerHTML = '<span class="stage"></span><span class="smsg"></span><span class="dur"></span>';
+      const tag = row.querySelector(".stage");
+      tag.textContent = stage || "";
+      if (/^[a-z_]+$/.test(stage || "")) tag.classList.add(stage);
+      row.querySelector(".smsg").textContent = msg;
+      steps.appendChild(row);
+      cur = row;
+      div.querySelector(".steps-toggle .live").textContent = msg;
+      $("chat").scrollTop = $("chat").scrollHeight;
+    },
+    // Turn done: collapse to one line, render the answer into this same message.
+    finish(answer, loaded, tokens, meta) {
+      summarize("thought for");
+      div.classList.remove("steps-open");
+      toggle.setAttribute("aria-expanded", "false");
+      renderMarkdown(body, answer);
+      if (loaded) div.insertAdjacentHTML("beforeend", renderBadges(loaded, tokens, meta));
+      $("chat").scrollTop = $("chat").scrollHeight;
+    },
+    // Failure keeps the steps open — the last one is where it died.
+    fail(text) {
+      summarize("failed after");
+      renderMarkdown(body, text);
       $("chat").scrollTop = $("chat").scrollHeight;
     },
     remove() {
@@ -1821,11 +1925,10 @@ async function send(message) {
         handleStreamEvent(JSON.parse(buf), pending, (f) => (finalEvent = f));
       } catch {}
     }
-    pending.remove();
     if (finalEvent && finalEvent.stage === "error") {
-      appendMessage("agent", `[error: ${finalEvent.msg}]`);
+      pending.fail(`[error: ${finalEvent.msg}]`);
     } else if (finalEvent) {
-      appendMessage("agent", finalEvent.answer, finalEvent.loaded, finalEvent.tokens, finalEvent.meta);
+      pending.finish(finalEvent.answer, finalEvent.loaded, finalEvent.tokens, finalEvent.meta);
       if (finalEvent.image && finalEvent.image.b64) appendImage(finalEvent.image);
       if (finalEvent.edits && finalEvent.edits.length) {
         const note = document.createElement("div");
@@ -1838,10 +1941,12 @@ async function send(message) {
       }
       turnsThisSession += 1;
       refreshSidebar();
+    } else {
+      // Stream ended without a done/error event — nothing to show.
+      pending.remove();
     }
   } catch (e) {
-    pending.remove();
-    appendMessage("agent", `[error: ${e.message}]`);
+    pending.fail(`[error: ${e.message}]`);
   } finally {
     $("send").disabled = false;
   }
@@ -1854,7 +1959,7 @@ function handleStreamEvent(ev, pending, setFinal) {
     return;
   }
   if (ev.stage === "error") {
-    pending.update(`error: ${ev.msg}`);
+    pending.update("error", ev.msg);
     setFinal(ev);
     return;
   }
@@ -1862,7 +1967,7 @@ function handleStreamEvent(ev, pending, setFinal) {
     setFinal(ev);
     return;
   }
-  if (ev.msg) pending.update(ev.msg);
+  if (ev.msg) pending.update(ev.stage, ev.msg);
 }
 
 async function loadSession(sid) {
