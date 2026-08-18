@@ -404,21 +404,20 @@
   .msg.steps-open .steps-toggle .chev { transform: rotate(90deg); }
   .steps {
     display: none;
-    flex-direction: column;
-    gap: 1px;
+    /* The list is the grid, not each row (`.step` is display: contents), so the
+       stage column sizes to the longest stage name and every row still lines
+       up. minmax(0,1fr) is the overflow fix: long archive names wrap in the
+       column instead of pushing the row past the message width. */
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    row-gap: 1px;
+    column-gap: 10px;
+    align-items: baseline;
     border-left: 2px solid var(--border-strong);
     padding: 2px 0 2px 12px;
     margin: 4px 0 10px 3px;
   }
-  .msg.steps-open .steps { display: flex; }
-  .step {
-    display: grid;
-    /* minmax(0,1fr) is the fix: long archive names wrap in the column instead
-       of pushing the row past the message width. */
-    grid-template-columns: 56px minmax(0, 1fr) auto;
-    column-gap: 10px;
-    align-items: baseline;
-  }
+  .msg.steps-open .steps { display: grid; }
+  .step { display: contents; }
   .step .stage { font-family: var(--font-mono); font-size: 10px; color: var(--text-mute); }
   .step .stage.archive { color: var(--c-arc); }
   .step .stage.reflect { color: var(--c-act); }
