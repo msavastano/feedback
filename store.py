@@ -415,6 +415,56 @@ class SessionStore:
                 return out
 
     @staticmethod
+    def stale_unrolled(
+        user_id: str,
+        idle_minutes: int,
+        exclude_session_id: str | None = None,
+        limit: int = 5,
+    ) -> list[str]:
+        """Sessions with real turns that were never rolled up and have gone quiet.
+
+        A session only becomes memory when something calls
+        `summarize_session_to_skill`, and on the web that depends on the browser
+        firing its pagehide beacon. A closed laptop, a crashed tab, or a lost
+        network drops the session on the floor: its turns stay in `turns`, which
+        no retrieval path reads, so the conversation is unrecallable forever.
+        This finds those so a sweep can roll them up late.
+
+        `idle_minutes` keeps a session the user is still using out of the set;
+        `exclude_session_id` protects the caller's own live session. `limit`
+        bounds the work, since each hit costs one LLM summarization — the
+        remainder is picked up by the next sweep.
+        """
+        _check_user_id(user_id)
+        if exclude_session_id is not None:
+            _check_session_id(exclude_session_id)
+        with get_pool().connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.session_id
+                    FROM sessions s
+                    JOIN turns t
+                      ON t.user_id = s.user_id AND t.session_id = s.session_id
+                    WHERE s.user_id = %s
+                      AND s.rolled_up = FALSE
+                      AND (%s::text IS NULL OR s.session_id <> %s)
+                    GROUP BY s.session_id
+                    HAVING count(t.idx) >= 2
+                       AND max(t.ts) < now() - make_interval(mins => %s)
+                    ORDER BY max(t.ts)
+                    LIMIT %s
+                    """,
+                    (
+                        user_id,
+                        exclude_session_id,
+                        exclude_session_id,
+                        idle_minutes,
+                        limit,
+                    ),
+                )
+                return [r[0] for r in cur.fetchall()]
+    @staticmethod
     def is_rolled_up(user_id: str, session_id: str) -> bool:
         _check_user_id(user_id)
         _check_session_id(session_id)

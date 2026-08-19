@@ -30,6 +30,10 @@ python agent.py --consolidate              # one user (AGENT_USER_ID or "default
 python agent.py --consolidate --all-users  # iterate every data/users/*/ dir
 python agent.py --consolidate --dry-run
 
+# rewrite topic-free `sessions-archive-*` descriptions from their own ## headings
+python agent.py --backfill-archive-descriptions --dry-run
+python agent.py --backfill-archive-descriptions --all-users
+
 # debug: dump raw LLM JSON from reflect/session calls
 $env:AGENT_DEBUG = "1"
 
@@ -39,6 +43,14 @@ $env:AGENT_HISTORY_CAP = "40"
 # skip per-turn reflect call to save one Gemini request/turn (on by default).
 # session-end summarization still persists memory. Helps free-tier rate limits.
 $env:AGENT_REFLECT = "0"   # disable
+
+# Stale-session sweep (on by default). Rolls up sessions the client never
+# ended, at the top of a turn, before the catalog is read. AGENT_SWEEP_IDLE_MIN
+# is how long a session must be silent to count as abandoned; 0 sweeps every
+# session except the live one, which is what you want when testing recall.
+$env:AGENT_SWEEP = "0"            # disable
+$env:AGENT_SWEEP_IDLE_MIN = "0"   # default 10
+$env:AGENT_SWEEP_MAX = "5"        # max sessions summarized per turn
 
 # CLI code execution (Gemini built-in sandbox; on by default, CLI only — never web)
 # respond() sets a per-model thinking_level (see THINKING_LEVELS in agent.py);
@@ -80,6 +92,7 @@ Skills are markdown files with YAML frontmatter (`name`, `description`). Tier ==
 
 ### Per-turn pipeline ([agent.py](agent.py) `run_turn_events`)
 
+0. **sweep** — `sweep_stale_sessions()` rolls up any session that has real turns, was never rolled up, and has been silent for `SWEEP_IDLE_MINUTES`. This runs **before** the catalog is read, so a conversation the user is following up on right now lands in *this* turn's catalog instead of one turn late. It exists because a session only becomes memory when `summarize_session_to_skill` runs, and on the web that hangs off the browser's `pagehide` beacon — a closed laptop or a lost tab drops the conversation into `turns`, which no retrieval path reads. Bounded (`SWEEP_MAX_PER_RUN`, each hit costs one summarization call) and never raises. A swept session that gets another turn has `rolled_up` reset to FALSE by `SessionStore.append_turn` and its `rollup_skill` remembered, so the re-summarize overwrites the same skill.
 1. **load** — read frontmatter of every skill (cheap; bodies not loaded yet).
 2. **pick** — `pick_skills()` gives the model the catalog (name + description + tier) plus the last 4 turns of the session (so pronoun-only follow-ups still match) and asks for a JSON array of `{name, score}` objects. System tier is auto-included. `_parse_picks()` normalises the reply (tolerates bare strings, drops+logs unknown names, dedupes, clamps 0–1) and sorts best-first; that ranking is preserved downstream. The score is the model's own confidence in the same call — a relative ranking for inspection/plotting, **not** a calibrated probability, and nothing thresholds on it. Scores ride in the `loaded.scores` map on the stream's `respond`/`done` events, show in the UI badges and the CLI `[loaded …]` line, and persist to `turns.picked` (JSONB, model rows only) as `{"scores": {...}, "catalog": <candidates offered>}` — never read back by the agent itself, but `store.skill_graph()` reads it for `GET /api/graph`, which backs the UI's **Map** modal — a 3D skill co-activation graph rendered with three.js (import map + module script at the end of [static/index.html](static/index.html)), laid out by `d3-force-3d`. A synthetic `memory` hub is pinned at the origin; system skills form an inner core, picked skills a middle band, unpicked ones the outer shell. Materials, radius ratios (3 : 1.82 : 1) and the hub ring come verbatim from `design-files/mind-map.{mtl,glb}` — glTF base colours are LINEAR, so they are set via `setRGB(..., LinearSRGBColorSpace)`, not as hex. Link colour encodes co-activation weight (violet = hub spine, saffron ≥ 2, teal = 1). The modal is always dark; the design's materials are lit for a dark stage and do not follow the app theme. Note `picked` was added after real history existed, so pick counts cover only turns recorded since then — `/api/graph` returns `turns` / `model_turns` / `since` so the UI can scope its claims instead of implying a lifetime count. Query it directly for retrieval drift:
 
@@ -90,7 +103,7 @@ FROM turns t, jsonb_each_text(t.picked->'scores') k
 WHERE t.user_id = 'alice'
 GROUP BY 1 ORDER BY picks DESC;
 ```
-2b. **fallback** — the picker only ever sees names and descriptions, so a fact filed inside a skill about another subject is invisible to it and the description becomes that fact's single point of failure. When `pick_skills()` returns **nothing**, `fallback_body_picks()` runs one Postgres full-text OR-query over `name || description || body` (`SkillStore.search_bodies`, ranked by `ts_rank`, top 3, system tier excluded) and uses the hits instead. No LLM call. `_search_terms()` reduces the prompt to ≤8 distinctive alphanumeric tokens — alphanumeric because the terms are interpolated into a `to_tsquery`, where a stray `&`/`|`/`:`/`!` would be a syntax error, not a miss (see [test_search_terms.py](test_search_terms.py)). Fallback hits carry `FALLBACK_SCORE = 0.1` so they're distinguishable from real picker confidences everywhere scores surface. Any exception is caught and logged — a search miss must never cost the user their turn.
+2b. **fallback** — the picker only ever sees names and descriptions, so a fact filed inside a skill about another subject is invisible to it and the description becomes that fact's single point of failure. `fallback_body_picks()` runs on **every turn** — one Postgres full-text OR-query over `name || description || body` (`SkillStore.search_bodies`, ranked by `ts_rank`, top 3, system tier excluded) and appends the hits the picker did not already return. No LLM call. It used to run only when the picker came back **empty**, which meant a single wrong-but-plausible pick suppressed the body search entirely — and that, not the empty result, is the common failure. `_search_terms()` reduces the prompt to ≤8 distinctive alphanumeric tokens — alphanumeric because the terms are interpolated into a `to_tsquery`, where a stray `&`/`|`/`:`/`!` would be a syntax error, not a miss (see [test_search_terms.py](test_search_terms.py)). Fallback hits carry `FALLBACK_SCORE = 0.1` so they're distinguishable from real picker confidences everywhere scores surface. Any exception is caught and logged — a search miss must never cost the user their turn.
 
 3. **archive** — for each picked archive skill, `pick_archive_sections()` asks the model which `##` sections to load (second cheap call per archive hit).
 4. **respond** — `respond()` builds the prompt with system bodies + active bodies + archive excerpts, plus a windowed history (`HISTORY_TURN_CAP`), and calls Gemini with `google_search` grounding enabled.
@@ -125,11 +138,17 @@ Before step 2, `run_turn_events` runs `detect_image_intent()` (cheap classifier 
 
 Each chat creates `sessions/<16-hex>.jsonl` (one JSON record per line). On `/api/session/end` (or Ctrl-C in CLI), `summarize_session_to_skill()` produces a `session-<timestamp>` active skill and appends a `{"_rollup": true}` marker line for idempotency.
 
+**Rollup is not guaranteed by the client.** `/api/session/end` fires from the New-session button (awaited) and a `navigator.sendBeacon` on `pagehide` — and the beacon does not always make it. A session that never ends keeps its turns in the `turns` table, which nothing in the retrieval path reads, so the conversation is unrecallable no matter how well the picker works. The **sweep** (step 0 of the per-turn pipeline) is the backstop that makes rollup a property of the server instead of the browser; `SessionStore.stale_unrolled` is the query behind it.
+
 ### Consolidation (offline)
 
 `consolidate()` folds all `session-*` active skills into one `sessions-archive-<timestamp>` archive skill (one `##` section per session, headed `<name> — <description>` so `pick_archive_sections` can match on topic, not timestamp), then deletes the originals from the live store.
 
 **Lossless despite the delete**: the fold is verbatim string concatenation of `s.body` — no LLM call, so nothing is summarized away — and `SkillStore.delete` snapshots each pre-image into `skill_versions` first. Idempotent because retired sessions no longer match the `active` + `session-*` filter. Each run mints a *new* timestamped archive skill rather than extending the previous one, so the archive tier grows by one skill per run (49 of them on the main user as of Aug 2026).
+
+**The archive skill's `description` is load-bearing for retrieval.** It is the only text `pick_skills` sees for that skill; `pick_archive_sections` never runs unless this line matched the prompt first. It used to read `Consolidated N session rollups (merged <date>)` — no topic at all, so every archive skill looked identical in the catalog and consolidated sessions were reachable only via `fallback_body_picks`, which itself only fires when the picker returns *nothing*. `_archive_description()` now folds the source descriptions into that line, in the same order as the `##` sections, capped by `ARCHIVE_DESC_ITEM_CAP` (90 chars/session) and `ARCHIVE_DESC_TOTAL_CAP` (400 chars total) because the line ships in the catalog of every pick call. Sessions that did not fit are counted (`+N more`), never dropped silently — the body still holds all of them.
+
+`python agent.py --backfill-archive-descriptions [--dry-run] [--all-users]` rewrites topic-free lines on archives merged before this landed, reconstructing them from the `##` headings already in the body. No LLM call, body untouched, re-runnable. Note that a description-only `upsert` writes no `skill_versions` pre-image (that snapshot is gated on the body changing), which is safe here only because the new line is derived from the body it leaves alone.
 
 (Pre-Postgres this wrote to a `skills.consolidated/` side path and required a manual swap. That path is gone; `--dry-run` is the preview now.)
 

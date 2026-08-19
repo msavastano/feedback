@@ -1303,6 +1303,16 @@ WRITE A SKILL whenever the user reveals ANY of:
 - People, pets, customers, systems referenced  → active
 - External resources (URLs, dashboards, docs)  → active
 - Bulky research notes, long-form knowledge  → archive (with ## sections)
+- Subjects they researched or asked substantive questions about, EVEN IF the
+  exchange revealed nothing personal  → active, "interest-<topic>"
+
+That last one is easy to skip and costly to skip. A question is itself a fact
+about the user: they asked it, and the answer you gave is what they now believe.
+An exchange like "what is the diesel crack spread?" reveals no name, project or
+preference, so a strict reading of the list above stores nothing at all and the
+topic is unrecallable in the next session. Record the subject AND the substance
+of the answer — enough that a later question about it retrieves something
+useful, not just a note that it came up.
 
 PREFER MANY SMALL SKILLS over one big one for active tier. Examples of good names:
 "user-profile", "response-style", "tech-stack", "project-<name>", "rule-<topic>",
@@ -1490,7 +1500,104 @@ def summarize_session_to_skill(
     return None
 
 
+# A session becomes memory only when summarize_session_to_skill runs, and on
+# the web that hangs off the browser's pagehide beacon. Close the laptop, lose
+# the tab, drop the network and the beacon never fires: the turns persist in a
+# table no retrieval path reads, so the conversation is unrecallable forever.
+# The sweep makes rollup a property of the server instead of the client.
+# Minutes of silence before a session counts as abandoned. Small is safe: a
+# session that gets another turn after being swept has `rolled_up` reset to
+# FALSE by SessionStore.append_turn, and `rollup_skill` is remembered, so the
+# next sweep re-summarizes over the SAME skill rather than minting a dupe.
+# Set to 0 to roll up every session except the live one (useful for testing).
+SWEEP_IDLE_MINUTES = int(os.environ.get("AGENT_SWEEP_IDLE_MIN", "10"))
+SWEEP_MAX_PER_RUN = int(os.environ.get("AGENT_SWEEP_MAX", "5"))
+
+
+def sweep_stale_sessions(
+    clients: Clients,
+    ctx: UserCtx,
+    exclude_session_id: str | None = None,
+    idle_minutes: int = SWEEP_IDLE_MINUTES,
+    limit: int = SWEEP_MAX_PER_RUN,
+) -> list[str]:
+    """Roll up sessions the client never ended. Returns the skill names written.
+
+    Safe to call repeatedly: summarize_session_to_skill no-ops on a session
+    already rolled up, and `idle_minutes` keeps a conversation still in progress
+    out of the set. Never raises — a sweep failure must not cost the caller its
+    turn, and the next sweep will retry the same sessions.
+    """
+    try:
+        stale = SessionStore.stale_unrolled(
+            ctx.user_id,
+            idle_minutes=idle_minutes,
+            exclude_session_id=exclude_session_id,
+            limit=limit,
+        )
+    except Exception as e:
+        print(f"[sweep lookup failed] {e}")
+        return []
+    saved: list[str] = []
+    for sid in stale:
+        try:
+            name = summarize_session_to_skill(clients, ctx, sid)
+        except Exception as e:
+            # One bad session (bad key, model error) must not block the rest.
+            print(f"[sweep failed] {sid}: {e}")
+            continue
+        if name:
+            saved.append(name)
+            print(f"[swept] {sid} -> {name}")
+    return saved
+
 # ---------- consolidation (offline pass) ----------
+
+# The description is the ONLY text the picker sees for an archive skill:
+# `pick_archive_sections` never runs unless this line matched the prompt first.
+# A bare "Consolidated N session rollups (merged <date>)" carries no topic, so
+# every sessions-archive-* looked identical in the catalog and none could be
+# selected on subject — the consolidated sessions were reachable only by
+# the body-text fallback, and only when the picker returned nothing at all. Fold
+# the source descriptions in, on a budget: this line ships in the catalog of
+# every pick call, so it must not grow with the archive.
+ARCHIVE_DESC_TOTAL_CAP = 400   # chars of topic text per archive skill
+ARCHIVE_DESC_ITEM_CAP = 90     # chars from any one session, so a verbose rollup
+                               # cannot crowd the others out
+
+
+def _archive_description(session_skills: list[Skill], merged_on: str) -> str:
+    """Topic-bearing description for a `sessions-archive-*` skill.
+
+    Keeps the count + merge date for provenance, then as many source
+    descriptions as the budget allows, in the same order as the body's `##`
+    sections. Sessions whose topic did not fit are counted, not dropped
+    silently — the body still holds every one of them.
+    """
+    topics: list[str] = []
+    used = 0
+    omitted = 0
+    for s in session_skills:
+        topic = " ".join((s.description or "").split()).rstrip(".")
+        if not topic:
+            omitted += 1
+            continue
+        if len(topic) > ARCHIVE_DESC_ITEM_CAP:
+            head = topic[:ARCHIVE_DESC_ITEM_CAP]
+            # Cut on a word boundary when there is one to cut on.
+            topic = (head.rsplit(" ", 1)[0] if " " in head else head) + "…"
+        if used + len(topic) > ARCHIVE_DESC_TOTAL_CAP:
+            omitted += 1
+            continue
+        topics.append(topic)
+        used += len(topic) + 2  # the "; " that will join it
+    n = len(session_skills)
+    head = f"{n} session{'' if n == 1 else 's'} merged {merged_on}"
+    if not topics:
+        return f"{head}."
+    more = f" (+{omitted} more)" if omitted else ""
+    return f"{head} — {'; '.join(topics)}{more}."
+
 
 def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
     """Fold every active `session-*` skill into one new archive skill and delete
@@ -1520,17 +1627,17 @@ def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
     # Build one archive skill of all session bodies, one `##` section each.
     # Heading carries the session's one-line description: pick_archive_sections
     # shows the model headings only, and a bare timestamp is unmatchable.
+    ordered = sorted(session_skills, key=lambda x: x.name)
     sections = []
-    for s in sorted(session_skills, key=lambda x: x.name):
+    for s in ordered:
         heading = f"{s.name} — {s.description}" if s.description else s.name
         sections.append(f"## {heading}\n\n{s.body.strip()}")
     body = "\n\n".join(sections)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     archive_name = f"sessions-archive-{stamp}"
-    desc = (
-        f"Consolidated {len(session_skills)} session rollups "
-        f"(merged {datetime.now().date().isoformat()})."
-    )
+    # Same order as the sections above, so a matched description points at
+    # a heading the section picker will then see.
+    desc = _archive_description(ordered, datetime.now().date().isoformat())
 
     if dry_run:
         summary["merged_archive_skill"] = archive_name
@@ -1550,6 +1657,52 @@ def consolidate(ctx: UserCtx, dry_run: bool = False) -> dict:
     summary["deleted_session_skills"] = deleted
     return summary
 
+
+def backfill_archive_descriptions(ctx: UserCtx, dry_run: bool = False) -> dict:
+    """Rewrite topic-free `sessions-archive-*` descriptions from their own bodies.
+
+    Archives merged before `_archive_description` landed are described only by
+    a count and a date, which the picker cannot match on any subject — they are
+    dead weight in the catalog. Their `##` headings already carry each source
+    session's description, so the topic line can be rebuilt with no LLM call and
+    no change to the body. Skips any archive whose headings carry no topic.
+    """
+    changed, skipped = [], []
+    for s in load_skills(ctx):
+        if s.tier != "archive" or not s.name.startswith("sessions-archive-"):
+            continue
+        topics = []
+        for heading, _chunk in split_sections(s.body):
+            head = heading.lstrip("#").strip()
+            _, sep, topic = head.partition(" — ")
+            if sep and topic.strip():
+                topics.append(topic.strip())
+        if not topics:
+            skipped.append({"name": s.name, "reason": "no topic in headings"})
+            continue
+        # The name is `sessions-archive-YYYYMMDD-HHMMSS`; recover the merge date
+        # from it so the rewritten line keeps its original provenance.
+        stamp = s.name.rsplit("-", 2)[-2] if s.name.count("-") >= 3 else ""
+        merged_on = (
+            f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}"
+            if len(stamp) == 8 and stamp.isdigit()
+            else "an earlier date"
+        )
+        desc = _archive_description(
+            [Skill(name="", description=t, body="") for t in topics], merged_on
+        )
+        if desc == s.description:
+            skipped.append({"name": s.name, "reason": "already current"})
+            continue
+        if not dry_run:
+            # Body is untouched, so SkillStore.upsert will not snapshot a
+            # pre-image (it only versions body changes). The old line is
+            # derivable from the body, so nothing is lost.
+            write_skill(ctx, s.name, desc, s.body, tier=s.tier)
+        changed.append(
+            {"name": s.name, "old": s.description, "new": desc}
+        )
+    return {"changed": changed, "skipped": skipped, "dry_run": dry_run}
 
 def apply_edits(ctx: UserCtx, edits: list[dict]) -> list[str]:
     applied: list[str] = []
@@ -1607,6 +1760,21 @@ def run_turn_events(
     `attachments` are session-only uploads: their bytes go to the model for this
     turn but only a text marker is persisted (see attachment_manifest).
     """
+    # Roll up whatever the client never ended, BEFORE the catalog is read, so a
+    # conversation the user is following up on right now is in THIS turn's
+    # catalog instead of arriving a turn late. Sessions still in progress are
+    # excluded by an idle window, and this session always is.
+    if _sweep_enabled():
+        swept = sweep_stale_sessions(
+            clients, ctx, exclude_session_id=session_id
+        )
+        if swept:
+            yield {
+                "stage": "sweep",
+                "msg": f"Saved {len(swept)} unfinished session(s) to memory…",
+                "saved": swept,
+            }
+
     yield {"stage": "load", "msg": "Reading skill catalog…"}
     skills = load_skills(ctx)
     system_skills = [s for s in skills if s.tier == "system"]
@@ -1713,16 +1881,28 @@ def run_turn_events(
     scored = pick_skills(
         clients, persisted_prompt, skills, model=ctx.model, history_snippet=recent
     )
-    if not scored:
-        # The picker only ever saw names and descriptions. Before concluding the
-        # store has nothing, read the bodies — a fact filed inside a skill about
-        # another subject is invisible to a description-only match.
-        scored = fallback_body_picks(ctx, persisted_prompt, skills)
-        if scored:
-            yield {
-                "stage": "pick",
-                "msg": f"No description matched; found {len(scored)} by body text…",
-            }
+    # The picker only ever saw names and descriptions, so a fact filed inside a
+    # skill about another subject is invisible to it and the description becomes
+    # that fact's single point of failure. Read the bodies too — on EVERY turn,
+    # not only when the picker came back empty. Gating this on an empty result
+    # meant one wrong-but-plausible pick suppressed the body search entirely,
+    # and that is the common failure, not the empty one. Costs one Postgres
+    # query and no LLM call.
+    picked_names = {n for n, _ in scored}
+    extra = [
+        (n, sc)
+        for n, sc in fallback_body_picks(ctx, persisted_prompt, skills)
+        if n not in picked_names
+    ]
+    if extra:
+        yield {
+            "stage": "pick",
+            "msg": f"Body text matched {len(extra)} skill(s) the catalog missed…",
+        }
+    # Picker ranking first, body-text hits appended. They keep FALLBACK_SCORE, so
+    # they stay distinguishable from real picker confidence wherever scores
+    # surface (UI badges, turns.picked, the graph).
+    scored = scored + extra
     scores = dict(scored)
     by_name = {s.name: s for s in skills}
     # Keep the picker's ranking — indexing by its order, not the catalog's.
@@ -1865,6 +2045,15 @@ def _code_exec_enabled() -> bool:
     )
 
 
+def _sweep_enabled() -> bool:
+    """Stale-session sweep toggle. On by default; set AGENT_SWEEP=0 to skip it.
+    Costs one indexed query per turn and returns nothing on almost all of them;
+    when it does fire it spends one summarization call to rescue a conversation
+    that would otherwise never become memory."""
+    return os.environ.get("AGENT_SWEEP", "1").strip().lower() not in (
+        "0", "false", "no", "off", ""
+    )
+
 def _reflect_enabled() -> bool:
     """Per-turn memory reflection toggle. On by default; set AGENT_REFLECT=0 to
     skip the reflect call and save one Gemini request per turn (free-tier quota).
@@ -1877,6 +2066,9 @@ def _reflect_enabled() -> bool:
 def main() -> None:
     if "--consolidate" in sys.argv:
         _run_consolidate_cli()
+        return
+    if "--backfill-archive-descriptions" in sys.argv:
+        _run_backfill_cli()
         return
     if not os.environ.get("DATABASE_URL"):
         print("Set DATABASE_URL (Postgres) before running.", file=sys.stderr)
@@ -1999,18 +2191,15 @@ def _consolidate_one(user_id: str, dry_run: bool) -> None:
     print(json.dumps(result, indent=2))
 
 
-def _run_consolidate_cli() -> None:
-    dry = "--dry-run" in sys.argv
-    all_users = "--all-users" in sys.argv
-
-    if all_users:
+def _cli_target_user_ids() -> list[str]:
+    """Users an offline pass should run over: every user with --all-users,
+    otherwise the single AGENT_USER_ID identity."""
+    if "--all-users" in sys.argv:
         uids = UserStore.list_user_ids()
         if not uids:
             print("No users found in the users table.", file=sys.stderr)
             sys.exit(1)
-        for uid in uids:
-            _consolidate_one(uid, dry)
-        return
+        return uids
 
     user_id = os.environ.get("AGENT_USER_ID") or "default"
     try:
@@ -2018,7 +2207,38 @@ def _run_consolidate_cli() -> None:
     except ValueError as e:
         print(f"Invalid AGENT_USER_ID: {e}", file=sys.stderr)
         sys.exit(1)
-    _consolidate_one(user_id, dry)
+    return [user_id]
+
+
+def _run_consolidate_cli() -> None:
+    dry = "--dry-run" in sys.argv
+    for uid in _cli_target_user_ids():
+        _consolidate_one(uid, dry)
+
+
+def _run_backfill_cli() -> None:
+    """Rewrite topic-free archive descriptions in place. Read-only with
+    --dry-run, which prints the old and new line for each archive."""
+    dry = "--dry-run" in sys.argv
+    for uid in _cli_target_user_ids():
+        ctx = UserCtx(user_id=uid)
+        print(
+            f"\n=== Backfilling archive descriptions for {uid} "
+            f"(dry_run={dry}) ==="
+        )
+        result = backfill_archive_descriptions(ctx, dry_run=dry)
+        for c in result["changed"]:
+            print(
+                f"\n  {c['name']}"
+                f"\n    - {c['old']}"
+                f"\n    + {c['new']}"
+            )
+        for s in result["skipped"]:
+            print(f"  [skip] {s['name']}: {s['reason']}")
+        print(
+            f"\n  {len(result['changed'])} changed, "
+            f"{len(result['skipped'])} skipped"
+        )
 
 
 if __name__ == "__main__":
