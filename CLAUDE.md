@@ -52,6 +52,11 @@ $env:AGENT_SWEEP = "0"            # disable
 $env:AGENT_SWEEP_IDLE_MIN = "0"   # default 10
 $env:AGENT_SWEEP_MAX = "5"        # max sessions summarized per turn
 
+# Minimum ts_rank a body-text fallback hit must clear (default 0.025). Raise it
+# if unrelated skills start riding into the prompt; the ranks are logged as
+# `[fallback ranks] <skill>=<rank>, ...` on every turn that finds anything.
+$env:AGENT_FALLBACK_MIN_RANK = "0.04"
+
 # CLI code execution (Gemini built-in sandbox; on by default, CLI only — never web)
 # respond() sets a per-model thinking_level (see THINKING_LEVELS in agent.py);
 # tool use needs thinking engaged or the model mis-emits a bare function_call.
@@ -103,7 +108,7 @@ FROM turns t, jsonb_each_text(t.picked->'scores') k
 WHERE t.user_id = 'alice'
 GROUP BY 1 ORDER BY picks DESC;
 ```
-2b. **fallback** — the picker only ever sees names and descriptions, so a fact filed inside a skill about another subject is invisible to it and the description becomes that fact's single point of failure. `fallback_body_picks()` runs on **every turn** — one Postgres full-text OR-query over `name || description || body` (`SkillStore.search_bodies`, ranked by `ts_rank`, top 3, system tier excluded) and appends the hits the picker did not already return. No LLM call. It used to run only when the picker came back **empty**, which meant a single wrong-but-plausible pick suppressed the body search entirely — and that, not the empty result, is the common failure. `_search_terms()` reduces the prompt to ≤8 distinctive alphanumeric tokens — alphanumeric because the terms are interpolated into a `to_tsquery`, where a stray `&`/`|`/`:`/`!` would be a syntax error, not a miss (see [test_search_terms.py](test_search_terms.py)). Fallback hits carry `FALLBACK_SCORE = 0.1` so they're distinguishable from real picker confidences everywhere scores surface. Any exception is caught and logged — a search miss must never cost the user their turn.
+2b. **fallback** — the picker only ever sees names and descriptions, so a fact filed inside a skill about another subject is invisible to it and the description becomes that fact's single point of failure. `fallback_body_picks()` runs on **every turn** — one Postgres full-text OR-query over `name || description || body` (`SkillStore.search_bodies`, ranked by `ts_rank`, top 3, system tier excluded) and appends the hits the picker did not already return. No LLM call. It used to run only when the picker came back **empty**, which meant a single wrong-but-plausible pick suppressed the body search entirely — and that, not the empty result, is the common failure. `_search_terms()` reduces the prompt to ≤8 distinctive alphanumeric tokens — alphanumeric because the terms are interpolated into a `to_tsquery`, where a stray `&`/`|`/`:`/`!` would be a syntax error, not a miss (see [test_search_terms.py](test_search_terms.py)). Hits must clear `FALLBACK_MIN_RANK` (0.025, env `AGENT_FALLBACK_MIN_RANK`): the query ORs every term, so one incidental word ("differences", "major") is otherwise enough to pull in a skill about an unrelated subject — tolerable when the fallback only ran on an empty picker, noise on every turn now that it always runs. Sampled against a real store, genuine topic matches scored 0.028-0.093 and pure noise 0.009-0.020, so the floor sits in the gap; `ts_rank` is unnormalised and drifts up with body length, so re-sample if junk starts appearing. `fallback_body_picks` logs the real ranks (`[fallback ranks] ...`) for exactly that. What rides downstream is the flat `FALLBACK_SCORE = 0.1`, so hits stay distinguishable from real picker confidences everywhere scores surface. Any exception is caught and logged — a search miss must never cost the user their turn.
 
 3. **archive** — for each picked archive skill, `pick_archive_sections()` asks the model which `##` sections to load (second cheap call per archive hit).
 4. **respond** — `respond()` builds the prompt with system bodies + active bodies + archive excerpts, plus a windowed history (`HISTORY_TURN_CAP`), and calls Gemini with `google_search` grounding enabled.

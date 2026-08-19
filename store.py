@@ -167,13 +167,26 @@ class SkillStore:
                 return [dict(r) for r in cur.fetchall()]
 
     @staticmethod
-    def search_bodies(user_id: str, terms: list[str], limit: int = 3) -> list[str]:
-        """Skill names whose text matches ANY of `terms`, best match first.
+    def search_bodies(
+        user_id: str,
+        terms: list[str],
+        limit: int = 3,
+        min_rank: float = 0.0,
+    ) -> list[tuple[str, float]]:
+        """(name, ts_rank) for skills matching ANY of `terms`, best match first.
 
         Fallback for the picker, which only ever sees names and descriptions: a
         fact filed inside a skill about something else is invisible to it, and
         the description becomes a single point of failure for that fact. This
         reads the bodies. System tier is excluded — it loads unconditionally.
+
+        `min_rank` drops weak hits. The query ORs every term, so a match on one
+        incidental word is enough to surface a skill about a completely
+        different subject; without a floor those ride into the prompt on every
+        turn. Sampled on a real store, genuine topic matches score ~0.03-0.09
+        and pure noise ~0.009-0.02, so the caller's default sits in the gap.
+        Note ts_rank here is unnormalised (no length divisor), so scores drift
+        up as bodies grow — re-sample if the floor starts letting junk through.
 
         # ponytail: seq scan with the tsvector computed per row. A user's
         # catalog is a few dozen small rows, so this is cheaper than a stored
@@ -188,18 +201,19 @@ class SkillStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT name
+                    SELECT name, ts_rank(tsv, q) AS rank
                     FROM skills,
                          to_tsquery('english', %s) AS q,
                          to_tsvector('english',
                              name || ' ' || description || ' ' || body) AS tsv
                     WHERE user_id = %s AND tier <> 'system' AND tsv @@ q
-                    ORDER BY ts_rank(tsv, q) DESC
+                      AND ts_rank(tsv, q) >= %s
+                    ORDER BY rank DESC
                     LIMIT %s
                     """,
-                    (query, user_id, limit),
+                    (query, user_id, min_rank, limit),
                 )
-                return [r[0] for r in cur.fetchall()]
+                return [(r[0], float(r[1])) for r in cur.fetchall()]
 
     @staticmethod
     def upsert(

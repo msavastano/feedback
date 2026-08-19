@@ -734,6 +734,16 @@ def _search_terms(prompt: str, cap: int = 8) -> list[str]:
 # (UI badges, turns.picked, the graph).
 FALLBACK_SCORE = 0.1
 
+# Minimum ts_rank for a body-text hit to count. The search ORs every term, so
+# one incidental word ("differences", "major") is enough to surface a skill
+# about an unrelated subject; since the fallback now runs on every turn rather
+# than only on an empty picker, that noise would ride into the prompt every
+# time. Sampled against a real store: genuine topic matches scored 0.028-0.093,
+# pure noise 0.009-0.020. 0.025 sits in the gap with margin on both sides.
+# Tune with AGENT_FALLBACK_MIN_RANK; re-sample if bodies grow a lot, since
+# ts_rank is unnormalised and drifts up with document length.
+FALLBACK_MIN_RANK = float(os.environ.get("AGENT_FALLBACK_MIN_RANK", "0.025"))
+
 
 def fallback_body_picks(
     ctx: UserCtx, prompt: str, skills: list[Skill]
@@ -741,11 +751,23 @@ def fallback_body_picks(
     """Text-match skills the picker didn't return. Best match first."""
     known = {s.name for s in skills if s.tier != "system"}
     try:
-        names = SkillStore.search_bodies(ctx.user_id, _search_terms(prompt))
+        hits = SkillStore.search_bodies(
+            ctx.user_id,
+            _search_terms(prompt),
+            min_rank=FALLBACK_MIN_RANK,
+        )
     except Exception as e:  # a search miss must never cost the user their turn
         print(f"[fallback search failed] {e}")
         return []
-    return [(n, FALLBACK_SCORE) for n in names if n in known]
+    if hits:
+        # The real ranks, so the floor can be re-tuned from logs rather than
+        # guessed. What rides downstream is the flat FALLBACK_SCORE.
+        print(
+            "[fallback ranks] "
+            + ", ".join(f"{n}={r:.4f}" for n, r in hits)
+            + f" (floor {FALLBACK_MIN_RANK})"
+        )
+    return [(n, FALLBACK_SCORE) for n, _r in hits if n in known]
 
 
 def pick_skills(
