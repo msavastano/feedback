@@ -14,6 +14,7 @@ swap in `agent.py` and `server.py` is a near 1:1 substitution.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 
@@ -526,13 +527,155 @@ class SessionStore:
 
 # ---------- skill graph ----------
 
-def _build_graph(catalog: list[dict], picks: list[dict], edges: list[dict]) -> dict:
+# `session-*` / `sessions-archive-*` are *containers*, not subjects: a rollup
+# holds one conversation and an archive holds dozens of unrelated ones. They
+# therefore relate to everything, on either signal — co-activation (the picker
+# names them alongside whatever topic the session covered) and content overlap
+# (their bodies literally contain every other skill's vocabulary). Left in, a
+# single archive node becomes a hub wiring unrelated subjects together, which
+# is most of what made the map's connections look arbitrary. They stay as
+# nodes; they are just never edge endpoints.
+_CONTAINER_RE = re.compile(r"^(session-|sessions-archive-)")
+
+
+def _is_container(name: str) -> bool:
+    return bool(_CONTAINER_RE.match(name))
+
+
+COACT_MIN_WEIGHT = 2    # one shared turn is a coincidence, not a relation
+
+# Content-similarity tuning. Similarity is idf-weighted cosine over the token
+# set of `name + description + body`, then thinned to a mutual k-nearest-
+# neighbour graph so one big skill can't cable itself to half the catalog.
+# Sampled against a real 54-skill store, the same way FALLBACK_MIN_RANK was:
+# genuine subject pairs ran 0.084-0.370 down to `interest-books` /
+# `interest-books-children-of-time`, and clear junk (`topic-ai-ipo-landscape` /
+# `topic-fifa-world-cup-2026-odds`, `image-generations` /
+# `interest-books-children-of-time`) sat at 0.074 and below, so the floor goes
+# in the gap. Unlike ts_rank, cosine is length-normalised, so this does not
+# drift upward as bodies grow — but re-sample if junk starts appearing.
+SIM_MIN = 0.08
+SIM_K = 3               # max content edges per skill
+SIM_MIN_TOKEN = 3       # shorter tokens are almost all stopwords
+# Deliberately small: idf already suppresses anything common across the store,
+# so this only has to catch words too frequent to be distinctive but too rare
+# for idf to flatten in a ~100-document corpus.
+_SIM_STOP = frozenset("""
+the and for that with this from was were are you your they them their there here
+what when where which who whom how why not but all any can could will would should
+may might must have has had does did done its it's about into over under more most
+some such than then also very much many other same each both few own too own via
+user asked said says note see using used use like just get got new one two three
+""".split())
+
+_TOKEN_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+
+
+def _sim_tokens(text: str) -> set[str]:
+    """Token set for similarity: lowercase words, hyphens split, stopwords out."""
+    out: set[str] = set()
+    for tok in _TOKEN_RE.findall(text.lower()):
+        for part in tok.split("-"):
+            if len(part) >= SIM_MIN_TOKEN and part not in _SIM_STOP:
+                out.add(part)
+    return out
+
+
+def _content_edges(docs: dict[str, set[str]]) -> list[dict]:
+    """Mutual-kNN content-similarity edges over skill token sets.
+
+    Why this exists at all: co-activation only ever describes skills the picker
+    has actually named together, which on a young store is a handful of them —
+    24 of 101 on the store this was built against, leaving three quarters of
+    the map as unconnected dots whose position means nothing. Body overlap
+    needs no pick history, so the taxonomy the flat namespace can't express
+    (`interest-sports-rules-fifa` / `-fifa-subs` / `-fifa-tie-breakers`) draws
+    itself. No LLM call and no embedding service: idf-weighted cosine over
+    token sets, which is cheap enough to run per request.
+    """
+    names = sorted(docs)
+    n_docs = len(names)
+    if n_docs < 2:
+        return []
+    df: dict[str, int] = {}
+    for toks in docs.values():
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+    # Smoothed idf. Plain log(N/(1+df)) hits exactly zero when a token is in
+    # half the corpus, which on a small store silently zeroes every shared
+    # token and returns no edges at all; the +1 keeps the weight positive
+    # while preserving the ranking on a full-sized catalog.
+    idf = {t: math.log(1 + n_docs / (1 + c)) for t, c in df.items()}
+    # Precompute norms once; the pair loop is O(n^2) and does enough work already.
+    norm = {
+        name: math.sqrt(sum(idf[t] * idf[t] for t in toks)) or 1.0
+        for name, toks in docs.items()
+    }
+    # Only pairs sharing a rare-ish token can clear SIM_MIN, so invert the token
+    # index and score those instead of all n^2 pairs.
+    postings: dict[str, list[str]] = {}
+    for name, toks in docs.items():
+        for t in toks:
+            postings.setdefault(t, []).append(name)
+    scored: dict[tuple[str, str], float] = {}
+    for t, holders in postings.items():
+        # A token in most of the catalog carries no signal and would make this
+        # loop quadratic for nothing. The floor of 4 keeps a small store from
+        # having every shared token cut as "too common".
+        if len(holders) < 2 or len(holders) > max(4, n_docs * 0.5):
+            continue
+        w = idf[t] * idf[t]
+        for i, a in enumerate(holders):
+            for b in holders[i + 1:]:
+                key = (a, b) if a < b else (b, a)
+                scored[key] = scored.get(key, 0.0) + w
+    pairs = []
+    for (a, b), acc in scored.items():
+        s = acc / (norm[a] * norm[b])
+        if s >= SIM_MIN:
+            pairs.append((s, a, b))
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+
+    kept: dict[str, int] = {}
+    out = []
+    for s, a, b in pairs:
+        if kept.get(a, 0) >= SIM_K or kept.get(b, 0) >= SIM_K:
+            continue
+        kept[a] = kept.get(a, 0) + 1
+        kept[b] = kept.get(b, 0) + 1
+        out.append(
+            {"source": a, "target": b, "kind": "content", "strength": round(s, 3)}
+        )
+    return out
+
+
+def _build_graph(
+    catalog: list[dict],
+    picks: list[dict],
+    edges: list[dict],
+    bodies: dict[str, str] | None = None,
+    turns: int = 0,
+) -> dict:
     """Join the skill catalog with retrieval stats into a node/edge graph.
 
     Pure so it can be tested without a database. Anything naming a skill that is
     no longer in the catalog is dropped: `consolidate()` deletes the `session-*`
     skills it folds into archive, so old `turns.picked` rows routinely reference
     skills that no longer exist, and the graph is a picture of current memory.
+
+    Two kinds of edge, and they answer different questions. `content` is what
+    the memory is *about* — idf-weighted body overlap, available for every
+    skill from the moment it is written. `coactivation` is what retrieval
+    actually *did* — skills the picker named in the same turn.
+
+    Co-activation is gated at `COACT_MIN_WEIGHT`. Raw co-occurrence was the
+    only relation this graph had, and on real stores two thirds of those edges
+    came from a single shared turn: a coincidence drawn as a permanent line
+    (`interest-diesel-crack-spread — interest-nest-wifi-pro-vs-tplink-m4` is a
+    real example). Each surviving edge also carries a Jaccard `strength`, so a
+    pair that is always retrieved together is distinguishable from one that
+    overlapped twice out of thirty — raw counts alone just favour whichever
+    skill gets picked most.
     """
     stats = {p["name"]: p for p in picks}
     nodes = []
@@ -556,34 +699,83 @@ def _build_graph(catalog: list[dict], picks: list[dict], edges: list[dict]) -> d
                 "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else updated,
             }
         )
-    known = {n["name"] for n in nodes if not n["always"]}
-    out_edges = [
-        {"source": e["src"], "target": e["dst"], "weight": int(e["weight"])}
-        for e in edges
-        if e["src"] in known and e["dst"] in known
-    ]
-    return {"nodes": nodes, "edges": out_edges}
+    # System skills bypass the picker, so they can never be a co-activation
+    # endpoint; containers are excluded for the reason at _CONTAINER_RE.
+    linkable = {
+        n["name"] for n in nodes if not n["always"] and not _is_container(n["name"])
+    }
+    freq = {p["name"]: int(p["picks"]) for p in picks}
+
+    out_edges = []
+    for e in edges:
+        a, b = e["src"], e["dst"]
+        if a not in linkable or b not in linkable:
+            continue
+        w = int(e["weight"])
+        if w < COACT_MIN_WEIGHT:
+            continue
+        union = freq.get(a, w) + freq.get(b, w) - w
+        out_edges.append(
+            {
+                "source": a,
+                "target": b,
+                "kind": "coactivation",
+                "weight": w,
+                # Jaccard: of the turns that used either skill, the share that
+                # used both. Unlike the raw count this does not simply rank the
+                # busiest skills first.
+                "strength": round(w / union, 3) if union > 0 else 1.0,
+            }
+        )
+    out_edges.sort(key=lambda e: (-e["strength"], e["source"], e["target"]))
+
+    if bodies:
+        docs = {}
+        for n in nodes:
+            name = n["name"]
+            if name not in linkable:
+                continue
+            toks = _sim_tokens(
+                f"{name} {n.get('description') or ''} {bodies.get(name) or ''}"
+            )
+            if toks:
+                docs[name] = toks
+        seen = {(e["source"], e["target"]) for e in out_edges}
+        out_edges += [
+            e
+            for e in _content_edges(docs)
+            if (e["source"], e["target"]) not in seen
+        ]
+
+    return {"nodes": nodes, "edges": out_edges, "turns": turns}
 
 
 def skill_graph(user_id: str) -> dict:
-    """Skill catalog + retrieval stats + co-activation edges, for the UI's map.
+    """Skill catalog + retrieval stats + content/co-activation edges for the map.
 
-    Reads `turns.picked` (written by the pick stage, never read back by the
-    agent itself). Turns without a `picked` map -- user rows and the
-    image-generation fast path -- contribute nothing.
+    Co-activation reads `turns.picked` (written by the pick stage, never read
+    back by the agent itself); turns without a `picked` map -- user rows and
+    the image-generation fast path -- contribute nothing. Content edges read
+    the bodies, so they exist for skills the picker has never touched.
     """
     _check_user_id(user_id)
     with get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            # Bodies come back whole for the similarity pass. That is ~130 KB
+            # on a mature store, and only on a Map open, so it is not worth a
+            # second round trip or a server-side tsvector to avoid.
             cur.execute(
                 """
-                SELECT name, tier, description, length(body) AS chars, updated_at
+                SELECT name, tier, description, body, length(body) AS chars,
+                       updated_at
                 FROM skills WHERE user_id = %s
                 ORDER BY name
                 """,
                 (user_id,),
             )
-            catalog = [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            bodies = {r["name"]: r.pop("body") or "" for r in rows}
+            catalog = rows
 
             cur.execute(
                 """
@@ -625,8 +817,7 @@ def skill_graph(user_id: str) -> dict:
             )
             row = cur.fetchone()
 
-    graph = _build_graph(catalog, picks, edges)
-    graph["turns"] = int(row["scored"])
+    graph = _build_graph(catalog, picks, edges, bodies=bodies, turns=int(row["scored"]))
     graph["model_turns"] = int(row["model_turns"])
     graph["since"] = row["since"].isoformat() if row["since"] else None
     return graph

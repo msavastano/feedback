@@ -671,8 +671,9 @@
   /* legend swatches mirror the design's materials, not the app's tier colors */
   #graphModal .gm-legend i.sys { background: #554739; }
   #graphModal .gm-legend i.act { background: #f8f1eb; }
-  #graphModal .gm-legend i.arc { background: #271bff; box-shadow: 0 0 5px #271bff; }
   #graphModal .gm-legend i.cold { background: #f8f1eb; opacity: .28; }
+  #graphModal .gm-legend i.lnk-content { background: #12b48e; box-shadow: 0 0 5px #12b48e; }
+  #graphModal .gm-legend i.lnk-coact { background: #ff7a1c; box-shadow: 0 0 5px #ff7a1c; }
   #graphClose {
     background: none;
     border: none;
@@ -981,8 +982,9 @@
       <div class="gm-legend">
         <span><i class="sys"></i>always loaded</span>
         <span><i class="act"></i>picked</span>
-        <span><i class="arc"></i>co-activation</span>
         <span><i class="cold"></i>unpicked in window</span>
+        <span><i class="lnk-content"></i>same subject</span>
+        <span><i class="lnk-coact"></i>retrieved together</span>
       </div>
       <button type="button" id="graphClose" title="Close (Esc)">×</button>
     </div>
@@ -1619,10 +1621,33 @@ function hideSkillPop() {
 }
 
 // ---------- skill map ----------
-// Nodes are skills, edges are "picked in the same turn". Sizes come from how
-// often the picker retrieved a skill; dim/dashed nodes were never retrieved.
+// Nodes are skills. Edges come in two kinds: `content` (their bodies are about
+// the same subject) and `coactivation` (the picker retrieved them in the same
+// turn, more than once). Sizes come from how often the picker retrieved a
+// skill; dim nodes were never retrieved in the scored window.
 let graphEsc = null;
 let graphData = null;
+
+// Every line on the map has to be explainable, or it reads as noise. This is
+// the answer to "why are those two connected?" for a clicked node.
+function neighboursOf(name) {
+  if (!graphData) return [];
+  return graphData.edges
+    .filter((e) => e.source === name || e.target === name)
+    .map((e) => ({
+      name: e.source === name ? e.target : e.source,
+      kind: e.kind,
+      strength: e.strength,
+      weight: e.weight,
+    }))
+    .sort((a, b) => b.strength - a.strength);
+}
+
+function edgeReason(n) {
+  return n.kind === "content"
+    ? `same subject · ${n.strength.toFixed(2)} body overlap`
+    : `retrieved together in ${n.weight} turns · ${n.strength.toFixed(2)} of either skill's turns`;
+}
 
 // `turns.picked` post-dates most history, so pick counts cover a window, not
 // the lifetime. Every "0 picks" claim has to be scoped to it.
@@ -1635,7 +1660,7 @@ function graphWindow() {
 function renderGraphInfo(d) {
   const box = $("graphInfo");
   if (!d) {
-    box.innerHTML = `<div class="gi-hint">Click a skill to see its stats. Drag to orbit, scroll to zoom.</div>`;
+    box.innerHTML = `<div class="gi-hint">Click a skill to see its stats and why it is connected to its neighbours. Drag to orbit, scroll to zoom.</div>`;
     return;
   }
   const rows = [["tier", d.tier], ["size", `${d.chars} chars`]];
@@ -1647,15 +1672,31 @@ function renderGraphInfo(d) {
     rows.push(["last picked", d.last_picked ? d.last_picked.slice(0, 10) : "—"]);
   }
   rows.push(["updated", d.updated_at ? d.updated_at.slice(0, 10) : "—"]);
+
+  const nb = neighboursOf(d.name);
+  const container = /^(session-|sessions-archive-)/.test(d.name);
+  const links = d.always
+    ? `<p class="gi-hint" style="margin-top:14px">System skills bypass the picker — loaded into every turn, never scored, so they have no connections.</p>`
+    : container
+      ? `<p class="gi-hint" style="margin-top:14px">Rollups and archives are containers, not subjects — they hold whole conversations, so they overlap with everything. Drawing their links would wire unrelated skills together through them, so they are left unconnected.</p>`
+      : nb.length
+        ? `<h4 style="margin:16px 0 6px;font-size:11px;color:var(--text-mute);font-weight:600;text-transform:uppercase;letter-spacing:.05em">Connected to</h4>` +
+          nb.map((n) =>
+            `<div style="margin-bottom:7px;font-size:11px;line-height:1.4">` +
+            `<span style="color:${n.kind === "content" ? "#12b48e" : "#ff7a1c"}">●</span> ` +
+            `<span style="font-family:var(--font-mono)">${escapeHtml(n.name)}</span>` +
+            `<div style="color:var(--text-mute);padding-left:14px">${escapeHtml(edgeReason(n))}</div>` +
+            `</div>`).join("")
+        : `<p class="gi-hint" style="margin-top:14px">No connections: nothing else in memory shares its subject, and the picker has not retrieved it beside the same skill twice.</p>`;
+
   box.innerHTML =
     `<h3>${escapeHtml(d.name)}</h3>` +
     `<div class="gi-desc">${escapeHtml(d.description) || "<em>no description</em>"}</div>` +
     `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("")}</dl>` +
-    (d.always
-      ? `<p class="gi-hint" style="margin-top:14px">System skills bypass the picker — loaded into every turn, never scored, so they have no connections.</p>`
-      : d.picks === 0
-        ? `<p class="gi-hint" style="margin-top:14px">Not picked in ${graphWindow()}. Scores only exist for turns after the picker started recording them, so this is not a full history — an older skill may well have been retrieved before that.</p>`
-        : "");
+    (!d.always && d.picks === 0
+      ? `<p class="gi-hint" style="margin-top:14px">Not picked in ${graphWindow()}. Scores only exist for turns after the picker started recording them, so this is not a full history — an older skill may well have been retrieved before that.</p>`
+      : "") +
+    links;
 
   const viewBtn = document.createElement("button");
   viewBtn.className = "btn btn-sm";
@@ -1704,10 +1745,13 @@ async function openGraph() {
   graphData = data;
   const cold = data.nodes.filter((n) => !n.always && n.picks === 0).length;
   const since = data.since ? ` since ${data.since.slice(0, 10)}` : "";
+  const byKind = { content: 0, coactivation: 0 };
+  for (const e of data.edges) byKind[e.kind] = (byKind[e.kind] || 0) + 1;
   $("graphSummary").textContent =
-    `${data.nodes.length} skills · ${data.edges.length} connections · ` +
+    `${data.nodes.length} skills · ${byKind.content} subject links · ` +
+    `${byKind.coactivation} co-retrieval links · ` +
     (data.turns === 0
-      ? "no pick scores recorded yet, so nothing is sized or connected"
+      ? "no pick scores recorded yet, so nothing is sized"
       : `scores from ${data.turns} of ${data.model_turns} turns${since}` +
         (cold ? ` · ${cold} unpicked in that window` : ""));
 
@@ -2320,11 +2364,21 @@ window.renderMindMap = function (data, onSelect) {
   // --- layout: the synthetic hub anchors the ball the design is built around
   const hub = { id: " hub", hub: true, picks: 0, fx: 0, fy: 0, fz: 0 };
   const nodes = [hub, ...data.nodes.map((n) => ({ ...n, id: n.name }))];
+  // The spine is decoration, not a measurement — give it a fixed middling
+  // strength so it doesn't inherit the maximum from the `?? 1` fallback and
+  // draw the fattest, shortest links on the map.
   const spine = data.nodes.filter((n) => n.always)
-    .map((n) => ({ source: hub.id, target: n.name, kind: "violet" }));
+    .map((n) => ({ source: hub.id, target: n.name, kind: "violet", strength: 0.5 }));
+  // Two relations, two colours. Teal is "these are about the same thing"
+  // (body overlap); saffron is "retrieval actually used them together". The
+  // old map had one relation — raw co-activation, weight 1 included — so most
+  // of its lines meant "these coincided in a single turn", which is why the
+  // connections read as arbitrary. Both kinds arrive pre-filtered by the
+  // server; nothing here needs to second-guess them.
   const co = data.edges.map((e) => ({
-    source: e.source, target: e.target, weight: e.weight,
-    kind: e.weight >= 2 ? "saffron" : "teal",
+    source: e.source, target: e.target,
+    weight: e.weight, strength: e.strength, edgeKind: e.kind,
+    kind: e.kind === "content" ? "teal" : "saffron",
   }));
   const links = [...spine, ...co];
 
@@ -2335,7 +2389,11 @@ window.renderMindMap = function (data, onSelect) {
   const shellOf = (n) => n.always ? SHELL * 0.55 : n.picks > 0 ? SHELL * 0.78 : SHELL;
 
   const sim = forceSimulation(nodes, 3)
-    .force("link", forceLink(links).id((d) => d.id).distance(70).strength(0.5))
+    // Strength shortens the link, so a pair that always travels together sits
+    // visibly tighter than one that merely shares vocabulary.
+    .force("link", forceLink(links).id((d) => d.id)
+      .distance((l) => 90 - 45 * Math.min(1, l.strength ?? 1))
+      .strength((l) => 0.25 + 0.45 * Math.min(1, l.strength ?? 1)))
     .force("charge", forceManyBody().strength(-90).distanceMax(400))
     // Gathers the unpicked majority onto the shell instead of letting repulsion
     // scatter it; kept weak enough that co-activation links still pull clusters.
@@ -2448,7 +2506,11 @@ window.renderMindMap = function (data, onSelect) {
     const t = new THREE.Mesh(cyl, linkMat[l.kind]);
     t.position.copy(a).add(b).multiplyScalar(0.5);
     t.quaternion.setFromUnitVectors(up, b.clone().sub(a).normalize());
-    t.scale.set(0.9 + (l.weight || 1) * 0.5, len, 0.9 + (l.weight || 1) * 0.5);
+    // Raw co-occurrence counts just rank the busiest skills first; the
+    // server's `strength` (Jaccard / cosine) is the comparable number, and it
+    // is the one the eye should be reading off the line.
+    const g = 0.8 + 1.9 * Math.min(1, l.strength ?? 1);
+    t.scale.set(g, len, g);
     scene.add(t);
   }
 
