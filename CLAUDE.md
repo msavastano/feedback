@@ -13,7 +13,7 @@ $env:GOOGLE_CLIENT_ID = "..." # OAuth 2.0 Web client ID from Google Cloud Consol
                               # authorized JS origin: http://127.0.0.1:8000
 
 # CLI model selection (which provider the single-process CLI talks to). Defaults
-# to MODEL (gemini-3.7-flash); set to a Claude id to exercise the Anthropic path.
+# to MODEL (gemini-3.8-flash); set to a Claude id to exercise the Anthropic path.
 $env:AGENT_MODEL = "claude-haiku-4-5"  # or "claude-sonnet-5"; needs ANTHROPIC_API_KEY, no Gemini key required
 
 # web server (Google OAuth login, bind to loopback only)
@@ -180,7 +180,7 @@ Cookie payload shape is `{"user_id": "..."}`. Downstream code is identity-source
 
 ### Model providers
 
-Default `MODEL = "gemini-3.7-flash"` in [agent.py](agent.py). `ALLOWED_MODELS` also
+Default `MODEL = "gemini-3.8-flash"` in [agent.py](agent.py). `ALLOWED_MODELS` also
 includes two Anthropic models, `CLAUDE_MODEL = "claude-haiku-4-5"` and
 `CLAUDE_SONNET_MODEL = "claude-sonnet-5"`. `provider_of(model)` routes a chat
 model to its SDK by id prefix (`claude*` → Anthropic, else Gemini), so both
