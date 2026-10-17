@@ -8,13 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # install
 pip install -r requirements.txt
 $env:GEMINI_API_KEY = "..."   # or GOOGLE_API_KEY (Gemini models + image gen)
-$env:ANTHROPIC_API_KEY = "..." # Claude Haiku 4.5 chat model (optional)
+$env:ANTHROPIC_API_KEY = "..." # Claude Haiku 5.5 chat model (optional)
 $env:GOOGLE_CLIENT_ID = "..." # OAuth 2.0 Web client ID from Google Cloud Console
                               # authorized JS origin: http://127.0.0.1:8000
 
 # CLI model selection (which provider the single-process CLI talks to). Defaults
 # to MODEL (gemini-3.8-flash); set to a Claude id to exercise the Anthropic path.
-$env:AGENT_MODEL = "claude-haiku-4-5"  # or "claude-sonnet-5"; needs ANTHROPIC_API_KEY, no Gemini key required
+$env:AGENT_MODEL = "claude-haiku-5-5"  # or "claude-sonnet-5"; needs ANTHROPIC_API_KEY, no Gemini key required
 
 # web server (Google OAuth login, bind to loopback only)
 uvicorn server:app --host 127.0.0.1 --port 8000
@@ -181,7 +181,7 @@ Cookie payload shape is `{"user_id": "..."}`. Downstream code is identity-source
 ### Model providers
 
 Default `MODEL = "gemini-3.8-flash"` in [agent.py](agent.py). `ALLOWED_MODELS` also
-includes two Anthropic models, `CLAUDE_MODEL = "claude-haiku-4-5"` and
+includes two Anthropic models, `CLAUDE_MODEL = "claude-haiku-5-5"` and
 `CLAUDE_SONNET_MODEL = "claude-sonnet-5"`. `provider_of(model)` routes a chat
 model to its SDK by id prefix (`claude*` → Anthropic, else Gemini), so both
 Claude ids share the same v1 path (web search, no image gen / code exec).
@@ -199,12 +199,11 @@ via `_log_anthropic_usage`.
 
 **Claude path is v1-scoped:** no image generation (the fast-path is gated to
 Gemini — a Claude user needs no Gemini key), no code execution. `thinking_level`
-maps to manual extended thinking (`thinking.budget_tokens`) only for
-`CLAUDE_MODEL` (Haiku 4.5) via `CLAUDE_THINKING_BUDGETS`; Sonnet 5 replaced
-manual budget_tokens with always-on adaptive thinking + an `effort` param (not
-wired here) and 400s if sent, so it's excluded from `CLAUDE_THINKING_MODELS`
-and the field is a no-op there. `THINKING_CAPABLE_MODELS` (Gemini models +
-Haiku) is exposed via `/api/me` as `thinking_capable_models` so the UI can
+maps to manual extended thinking (`thinking.budget_tokens`) only for models in
+`CLAUDE_THINKING_MODELS`, which is currently empty: Haiku 5.5 and Sonnet 5 use
+adaptive thinking + an `effort` param (not wired here) and 400 on budget_tokens,
+so the field is a no-op for both. `THINKING_CAPABLE_MODELS` (Gemini models only,
+for now) is exposed via `/api/me` as `thinking_capable_models` so the UI can
 disable the "think" dropdown (shows "NA") for models where it wouldn't do
 anything, e.g. Sonnet 5. BYOK: the web path takes the Anthropic key via the `X-Anthropic-Key`
 header (mirrors `X-Gemini-Key`); `api_chat` requires the key for the chosen

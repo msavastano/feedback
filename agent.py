@@ -31,10 +31,9 @@ from google.genai import errors, types
 from store import SessionStore, SkillStore, UserStore, normalize_skill_name
 
 MODEL = "gemini-3.8-flash"
-# Claude Haiku 4.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
-# web search + manual extended thinking (budget_tokens) — no image generation,
-# no code execution.
-CLAUDE_MODEL = "claude-haiku-4-5"
+# Claude Haiku 5.5 (Anthropic API). Cheap/fast tier; text + vision + server-side
+# web search — no image generation, no code execution.
+CLAUDE_MODEL = "claude-haiku-5-5"
 CLAUDE_SONNET_MODEL = "claude-sonnet-5"  # Sonnet 5 (Anthropic). Same v1 path as Haiku.
 ALLOWED_MODELS = (
     "gemini-3.8-flash",
@@ -56,7 +55,9 @@ PRICING = {
     "gemini-3.8-flash":      {"input": 0.75, "output": 3.75},
     "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
     "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
-    CLAUDE_MODEL:            {"input": 1.00, "output": 5.00},   # claude-haiku-4-5
+    # claude-haiku-5-5: rate for prompts up to 100K tokens. Prompts over 100K
+    # pay 0.50/2.50 (platform.claude.com pricing page, 2026-10-17).
+    CLAUDE_MODEL:            {"input": 0.10, "output": 0.50},
     CLAUDE_SONNET_MODEL:     {"input": 3.00, "output": 15.00},  # claude-sonnet-5 (std; intro $2/$10 thru 2026-08-31)
 }
 
@@ -90,12 +91,12 @@ THINKING_LEVEL_NAMES = {
     "high": types.ThinkingLevel.HIGH,
 }
 
-# Claude Haiku 4.5 supports manual extended thinking (thinking.budget_tokens).
-# Claude Sonnet 5 does NOT — manual budget_tokens was replaced by always-on
-# adaptive thinking + an `effort` param on Sonnet 5, and returns a 400 if sent.
-# So only Haiku is wired here; the UI disables the control (shows "NA") for
-# any model not in this set.
-CLAUDE_THINKING_MODELS = (CLAUDE_MODEL,)
+# Manual extended thinking (thinking.budget_tokens) was the Haiku 4.5 path.
+# Newer Claude models (Sonnet 5, and Haiku 5.5 is treated the same) use
+# adaptive thinking + an `effort` param instead and 400 on budget_tokens, so
+# no Claude model is wired here; the UI disables the control (shows "NA") for
+# any model not in this set. Add a model back only if it accepts budget_tokens.
+CLAUDE_THINKING_MODELS = ()
 
 # budget_tokens per level, reusing the same minimal/low/medium/high names as
 # the Gemini dropdown. max_tokens must exceed budget_tokens (see _chat_respond).
@@ -511,8 +512,8 @@ CLAUDE_MAX_TOKENS = 8192
 # (_base_client._calculate_nonstreaming_timeout). max_tokens is answer budget +
 # thinking budget, so cap the sum here instead of switching to streaming.
 CLAUDE_NONSTREAM_MAX_TOKENS = 21_000
-# Server-side web-search tool for Haiku 4.5. The newer _20260209 (dynamic
-# filtering) variant requires Opus 4.6+/Sonnet 4.6 and 400s on Haiku.
+# Server-side web-search tool for the Claude path. Kept on the original
+# _20250305 version, which every Claude model here accepts.
 CLAUDE_WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
 
 
@@ -566,10 +567,10 @@ def _chat_respond(
     prompt that `respond` already assembled. Returns (text, usage)."""
     if provider_of(model) == "anthropic":
         # v1 Claude path: web search (server-side) when allowed; no code
-        # execution. Manual extended thinking (budget_tokens) only exists on
-        # Haiku 4.5 — Sonnet 5 uses always-on adaptive thinking + an `effort`
-        # param instead and 400s on budget_tokens, so it's excluded from
-        # CLAUDE_THINKING_MODELS and thinking_level is a no-op for it here.
+        # execution. Manual extended thinking (budget_tokens) only runs for
+        # models in CLAUDE_THINKING_MODELS (currently none — Haiku 5.5 and
+        # Sonnet 5 use adaptive thinking and 400 on budget_tokens), so
+        # thinking_level is a no-op for them here.
         budget = resolve_claude_thinking_budget(model, thinking_level)
         if budget:
             # "high" (32000) would blow past the SDK's non-streaming ceiling.
