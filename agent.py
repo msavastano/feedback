@@ -351,26 +351,71 @@ def session_turns(ctx: UserCtx, session_id: str) -> list[dict]:
 
 # ---------- LLM helpers ----------
 
+# Cloud sessions (Claude Code on the web) can hold an API key as a "network
+# secret": the agent proxy adds the real key to outbound requests for the
+# hosts listed on the secret, so the key never appears in this process's
+# environment. The SDK still needs *some* key to build a client and set the
+# auth header, so we hand it this placeholder and the proxy swaps in the real
+# value on the way out.
+PROXY_KEY_PLACEHOLDER = "proxy-injected"
+
+
+def _in_cloud_session() -> bool:
+    """True inside a Claude Code cloud session whose agent proxy can inject
+    network secrets."""
+    return os.environ.get("CLAUDE_CODE_REMOTE", "").lower() == "true" or bool(
+        os.environ.get("CCR_AGENT_PROXY_ENABLED")
+    )
+
+
+def gemini_env_key() -> str | None:
+    """Gemini key for CLI use. A local env var (GEMINI_API_KEY or
+    GOOGLE_API_KEY) wins; in a cloud session without one, fall back to the
+    placeholder so a network secret on generativelanguage.googleapis.com
+    (header `x-goog-api-key`) supplies the real key."""
+    key = (
+        os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    ).strip()
+    if key:
+        return key
+    return PROXY_KEY_PLACEHOLDER if _in_cloud_session() else None
+
+
+def anthropic_env_key() -> str | None:
+    """Anthropic key for CLI use. AGENT_ANTHROPIC_API_KEY is checked first so a
+    cloud environment can carry the key without colliding with the
+    ANTHROPIC_API_KEY that Claude Code itself may read. No network-secret
+    fallback: the agent proxy never injects secrets into api.anthropic.com, so
+    this key must be a real environment variable everywhere."""
+    key = (
+        os.environ.get("AGENT_ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or ""
+    ).strip()
+    return key or None
+
+
 def _client(api_key: str | None = None) -> genai.Client:
     """Build a Gemini client.
 
     Web deploy: each request supplies the user's own key (held only in their
-    browser session) — pass it here. CLI: `api_key` is None and the SDK falls
-    back to GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
+    browser session) — pass it here. CLI: `api_key` is None and we use
+    `gemini_env_key()` (local env var, or the cloud network-secret placeholder).
     """
-    if api_key:
-        return genai.Client(api_key=api_key)
+    key = api_key or gemini_env_key()
+    if key:
+        return genai.Client(api_key=key)
     return genai.Client()
 
 
 def _anthropic_client(api_key: str | None = None) -> anthropic.Anthropic:
     """Build an Anthropic client. Mirrors `_client`: web deploy passes the user's
-    own key (held only in their browser session); CLI passes None and the SDK
-    falls back to ANTHROPIC_API_KEY from the environment. The SDK retries
-    429/5xx automatically (max_retries default 2), so the Claude path needs no
-    hand-rolled backoff."""
-    if api_key:
-        return anthropic.Anthropic(api_key=api_key)
+    own key (held only in their browser session); CLI passes None and we use
+    `anthropic_env_key()`. The SDK retries 429/5xx automatically (max_retries
+    default 2), so the Claude path needs no hand-rolled backoff."""
+    key = api_key or anthropic_env_key()
+    if key:
+        return anthropic.Anthropic(api_key=key)
     return anthropic.Anthropic()
 
 
@@ -2108,17 +2153,26 @@ def main() -> None:
     # to MODEL via UserCtx.__post_init__. Only the chosen provider's key is
     # required at startup.
     ctx = UserCtx(user_id=user_id, model=os.environ.get("AGENT_MODEL") or MODEL)
-    has_gemini = bool(
-        os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    )
-    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    gemini_key = gemini_env_key()
+    has_gemini = bool(gemini_key)
+    has_anthropic = bool(anthropic_env_key())
     if provider_of(ctx.model) == "anthropic":
         if not has_anthropic:
-            print("Set ANTHROPIC_API_KEY for the selected model.", file=sys.stderr)
+            print(
+                "Set ANTHROPIC_API_KEY (or AGENT_ANTHROPIC_API_KEY) for the "
+                "selected model.",
+                file=sys.stderr,
+            )
             sys.exit(1)
     elif not has_gemini:
         print("Set GEMINI_API_KEY or GOOGLE_API_KEY.", file=sys.stderr)
         sys.exit(1)
+    if gemini_key == PROXY_KEY_PLACEHOLDER:
+        print(
+            "No Gemini key in env; relying on a cloud network secret for "
+            "generativelanguage.googleapis.com (header x-goog-api-key).",
+            file=sys.stderr,
+        )
 
     clients = Clients(
         gemini=_client() if has_gemini else None,

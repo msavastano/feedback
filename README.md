@@ -67,6 +67,18 @@ Mock login has no password — bind to `127.0.0.1` only.
 ## Env vars
 
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` — required.
+- `ANTHROPIC_API_KEY` (or `AGENT_ANTHROPIC_API_KEY`) — needed only for Claude chat models.
+
+### Claude Code cloud sessions (claude.ai/code)
+
+Local env vars work unchanged. In a cloud session the CLI also works with a
+**network secret** instead of an env var for Gemini: with no Gemini key in the
+environment it sends a placeholder key, and the agent proxy injects the real one.
+Add the secret on the cloud environment with host `generativelanguage.googleapis.com`,
+header name `x-goog-api-key`, prefix cleared. The proxy never injects into
+`api.anthropic.com`, so a Claude key must be an environment variable there —
+use `AGENT_ANTHROPIC_API_KEY` so it doesn't clash with Claude Code's own
+`ANTHROPIC_API_KEY`. `DATABASE_URL` is also an environment variable.
 - `AGENT_USER_ID` — CLI only. Must exist in `mock_users.json`.
 - `SECRET_KEY` — optional. Auto-generated at `.secret_key` if absent.
 - `AGENT_DEBUG=1` — prints raw LLM JSON from reflect/session calls.
