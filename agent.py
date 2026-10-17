@@ -55,8 +55,9 @@ PRICING = {
     "gemini-3.8-flash":      {"input": 0.75, "output": 3.75},
     "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
     "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
-    # CLAUDE_MODEL (claude-haiku-5-5): rate not confirmed yet, so it's left out
-    # and the UI shows "price n/a". Add it here once known.
+    # claude-haiku-5-5: rate for prompts up to 100K tokens. Prompts over 100K
+    # pay 0.50/2.50 (platform.claude.com pricing page, 2026-10-17).
+    CLAUDE_MODEL:            {"input": 0.10, "output": 0.50},
     CLAUDE_SONNET_MODEL:     {"input": 3.00, "output": 15.00},  # claude-sonnet-5 (std; intro $2/$10 thru 2026-08-31)
 }
 
