@@ -206,7 +206,11 @@ branch is unchanged (`_generate` + `google_search` + `ThinkingConfig`, plus
 optional code execution). The Claude branch calls `messages.create` with the
 server-side `web_search_20250305` tool, loops on `stop_reason == "pause_turn"`,
 and parses JSON via `_extract_json` (fence/balance-tolerant — Haiku structured
-output isn't assumed). Anthropic usage feeds the same `[tokens <label>]` print
+output isn't assumed). Both providers can split one answer into several text parts
+(Claude cuts a text block at every web-search citation, often mid-sentence),
+so the `respond` tail joins consecutive text with `""`, never `"\n\n"` — that
+used to render as a blank line after a comma. Only code/result blocks in
+`_assemble_answer` get blank lines around them ([test_assemble_answer.py](test_assemble_answer.py)). Anthropic usage feeds the same `[tokens <label>]` print
 via `_log_anthropic_usage`.
 
 **Claude path is v1-scoped:** no image generation (the fast-path is gated to
