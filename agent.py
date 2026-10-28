@@ -664,7 +664,12 @@ def _chat_respond(
                 {"role": "assistant", "content": resp.content}
             ]
         usage = _log_anthropic_usage(label, resp)
-        text = "\n\n".join(
+        # Web search splits one answer into many text blocks, cut wherever a
+        # citation starts or ends -- often mid-sentence ("If that also fails,"
+        # | "a majority of the Knesset..."). The blocks are one continuous
+        # string, so they join with nothing; a "\n\n" here renders as a
+        # paragraph break after the comma.
+        text = "".join(
             b.text
             for b in (resp.content or [])
             if getattr(b, "type", None) == "text" and getattr(b, "text", None)
@@ -917,18 +922,31 @@ def _assemble_answer(resp) -> str:
     parts = getattr(content, "parts", None) if content else None
     if not parts:
         return resp.text or ""
+    # Consecutive text parts are one continuous string the model split
+    # (grounding can cut mid-sentence), so they concatenate as-is. Only a code
+    # or result block gets blank lines around it, which its fence needs.
     out: list[str] = []
+    prev_text = False
     saw_function_call = False
     for part in parts:
         text = getattr(part, "text", None)
         if text:
-            out.append(text)
+            if prev_text:
+                out[-1] += text
+            else:
+                out.append(text)
+            prev_text = True
+            continue
+        # Parts with nothing to show (a bare thought signature) must not split
+        # the text around them, so only an appended block resets prev_text.
         code = getattr(part, "executable_code", None)
         if code is not None and getattr(code, "code", None):
             out.append(f"```python\n{code.code}\n```")
+            prev_text = False
         result = getattr(part, "code_execution_result", None)
         if result is not None and getattr(result, "output", None):
             out.append(f"```\n{result.output}\n```")
+            prev_text = False
         # A bare function_call (no matching callable) would otherwise leave the
         # answer empty. Surface it instead of silently dropping the turn.
         fc = getattr(part, "function_call", None)

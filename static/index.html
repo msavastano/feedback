@@ -207,76 +207,166 @@
   #themeToggle .icon-dark { display: none; }
   :root[data-theme="dark"] #themeToggle .icon-light { display: none; }
   :root[data-theme="dark"] #themeToggle .icon-dark { display: inline; }
+  /* ---- Chat area ----
+     One centered reading column (--col) shared by the transcript and the
+     composer, so the eye never travels more than ~75 characters per line.
+     The side padding does the centering, which keeps every child of #chat
+     (messages, busy rows, memory notes) in the column with no wrapper. */
+  :root { --col: 760px; --gutter: max(20px, calc((100% - var(--col)) / 2)); }
   #chat {
     flex: 1;
     overflow-y: auto;
-    padding: 16px;
+    padding: 32px var(--gutter) 24px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 28px;
   }
-  .msg { max-width: 720px; }
+  #chat:empty::before {
+    content: "What can I help with?";
+    margin: auto;
+    font-family: var(--font-display);
+    font-size: 24px;
+    font-weight: 500;
+    color: var(--text-mute);
+  }
+  .msg { width: 100%; min-width: 0; }
+  /* The bubble and the alignment already say who spoke; the label stays for
+     screen readers only. */
+  .msg .role {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.user {
+    width: auto;
+    max-width: 85%;
     align-self: flex-end;
-    background: var(--user-bg);
-    color: var(--user-fg);
-    padding: 8px 14px;
-    border-radius: var(--r-card);
+    background: var(--surface-3);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 20px;
+    font-size: 15px;
+    line-height: 1.55;
   }
-  .msg.user .role { color: inherit; opacity: 0.6; }
-  .msg.agent { align-self: flex-start; }
-  .msg .role { font-size: 10px; color: var(--text-3); text-transform: uppercase; margin-bottom: 2px; }
-  .msg .body { white-space: pre-wrap; }
-  /* rendered markdown (agent messages) — drop pre-wrap, let block elements flow */
-  .msg .body.md { white-space: normal; }
+  .msg.agent { align-self: stretch; }
+  /* rendered markdown (agent messages) — document typography, not chat text */
+  .msg .body.md {
+    white-space: normal;
+    overflow-wrap: break-word;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--text);
+  }
   .msg .body.md > :first-child { margin-top: 0; }
   .msg .body.md > :last-child { margin-bottom: 0; }
-  .msg .body.md p { margin: 0 0 8px; }
+  .msg .body.md p { margin: 0 0 0.9em; }
+  .msg .body.md strong { font-weight: 600; }
   .msg .body.md h1,
   .msg .body.md h2,
   .msg .body.md h3,
-  .msg .body.md h4 { margin: 14px 0 6px; font-family: var(--font-display); line-height: 1.3; }
-  .msg .body.md h1 { font-size: 1.4em; }
+  .msg .body.md h4 {
+    margin: 1.5em 0 0.5em;
+    font-family: var(--font-display);
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+  }
+  .msg .body.md h1 { font-size: 1.45em; }
   .msg .body.md h2 { font-size: 1.25em; }
-  .msg .body.md h3 { font-size: 1.1em; }
+  .msg .body.md h3 { font-size: 1.08em; }
   .msg .body.md h4 { font-size: 1em; }
   .msg .body.md ul,
-  .msg .body.md ol { margin: 0 0 8px; padding-left: 22px; }
-  .msg .body.md li { margin: 2px 0; }
-  .msg .body.md li > p { margin: 0; }
-  .msg .body.md a { color: var(--c-sys); text-decoration: underline; }
+  .msg .body.md ol { margin: 0 0 0.9em; padding-left: 1.4em; }
+  .msg .body.md li { margin: 0.3em 0; padding-left: 0.2em; }
+  .msg .body.md li::marker { color: var(--text-3); }
+  .msg .body.md li > p { margin: 0 0 0.4em; }
+  .msg .body.md li > ul,
+  .msg .body.md li > ol { margin: 0.3em 0 0; }
+  .msg .body.md a {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 3px;
+  }
+  .msg .body.md a:hover { text-decoration-color: currentColor; }
   .msg .body.md code {
     font-family: var(--font-mono);
-    font-size: 0.9em;
-    background: var(--surface-2);
-    padding: 1px 5px;
-    border-radius: 4px;
-  }
-  .msg .body.md pre {
+    font-size: 0.86em;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    padding: 10px 12px;
-    overflow-x: auto;
-    margin: 0 0 8px;
+    padding: 1px 5px;
+    border-radius: 6px;
   }
-  .msg .body.md pre code { background: none; padding: 0; font-size: 0.85em; }
+  .msg .body.md pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0 0 1em;
+    line-height: 1.55;
+  }
+  .msg .body.md pre code { background: none; border: none; padding: 0; font-size: 13px; }
   .msg .body.md blockquote {
-    margin: 0 0 8px;
-    padding-left: 12px;
+    margin: 0 0 0.9em;
+    padding: 2px 0 2px 16px;
     border-left: 3px solid var(--border-strong);
     color: var(--text-2);
   }
+  .msg .body.md blockquote > :last-child { margin-bottom: 0; }
+  /* Tables scroll inside the column instead of widening the page. */
   .msg .body.md table {
-    border-collapse: collapse;
-    margin: 0 0 8px;
-    font-size: 0.95em;
+    display: block;
+    max-width: 100%;
+    width: max-content;
+    overflow-x: auto;
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    margin: 0 0 1em;
+    font-size: 14px;
+    line-height: 1.5;
   }
   .msg .body.md th,
-  .msg .body.md td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
-  .msg .body.md th { background: var(--surface-2); }
-  .msg .body.md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
-  .msg .body.md img { max-width: 100%; }
+  .msg .body.md td {
+    padding: 8px 14px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+  }
+  .msg .body.md tr:last-child td { border-bottom: none; }
+  .msg .body.md th { background: var(--surface); font-weight: 600; }
+  .msg .body.md hr { border: none; border-top: 1px solid var(--border); margin: 1.6em 0; }
+  .msg .body.md img { max-width: 100%; border-radius: var(--r-card); }
+  /* Under an answer: copy button, then the loaded-skill / token badges. */
+  .msg-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 12px 0 0 -8px; /* the copy button's padding, so its icon lines up with the text */
+  }
+  .msg-foot .badges { margin-top: 0; }
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--r-pill);
+    padding: 3px 9px 3px 7px;
+    font: inherit;
+    font-size: 11px;
+    color: var(--text-3);
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .copy-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
   .msg.gen-image {
     display: flex;
     flex-direction: column;
@@ -360,7 +450,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--r-card);
-    max-width: 720px;
+    max-width: 100%;
   }
   .spinner {
     width: 12px;
@@ -425,14 +515,34 @@
   .step .smsg { font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
   .step.now .smsg { color: var(--text); }
   .step .dur { font-size: 10px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+  /* Composer: one rounded box in the reading column. The textarea grows with
+     its content (see autosizeInput) up to 40% of the viewport. */
   form#composer {
-    border-top: 1px solid var(--border);
-    padding: 10px 16px;
+    padding: 8px var(--gutter) 14px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    background: var(--bg);
   }
-  #composer .composer-row { display: flex; gap: 8px; }
+  #composer .composer-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 24px;
+    padding: 6px;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  }
+  #composer .composer-row:focus-within {
+    border-color: var(--text-mute);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  }
+  #composer .hint {
+    font-size: 11px;
+    color: var(--text-mute);
+    text-align: center;
+  }
   #attachBar {
     display: none;
     flex-wrap: wrap;
@@ -468,43 +578,53 @@
   }
   #attachBar .chip button:hover { color: var(--danger); }
   #attachBtn {
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border-strong);
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    color: var(--text-2);
+    border: none;
     border-radius: var(--r-pill);
     cursor: pointer;
-    padding: 0 14px;
-    font-size: 16px;
-    transition: background 0.12s ease;
+    padding: 0;
+    transition: background 0.12s ease, color 0.12s ease;
   }
-  #attachBtn:hover { background: var(--surface-3); }
+  #attachBtn:hover { background: var(--surface-3); color: var(--text); }
   #composer textarea {
     flex: 1;
-    background: var(--surface);
+    min-width: 0;
+    background: transparent;
     color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--r-card);
-    padding: 10px 14px;
+    border: none;
+    padding: 9px 4px;
     font: inherit;
+    font-size: 15px;
+    line-height: 1.45;
     resize: none;
-    min-height: 48px;
+    min-height: 38px;
+    max-height: 40vh;
+    overflow-y: auto;
   }
-  #composer textarea:focus {
-    outline: none;
-    border-color: var(--text-mute);
-  }
+  #composer textarea:focus { outline: none; }
+  #composer textarea::placeholder { color: var(--text-mute); }
   #composer #send {
+    flex: 0 0 auto;
+    height: 38px;
     background: var(--accent);
     color: var(--accent-fg);
     border: none;
-    padding: 0 22px;
+    padding: 0 18px;
     border-radius: var(--r-pill);
     cursor: pointer;
+    font: inherit;
     font-weight: 600;
-    transition: background 0.12s ease;
+    transition: background 0.12s ease, opacity 0.12s ease;
   }
   #composer #send:hover { background: var(--accent-hover); }
-  #composer #send:disabled { opacity: 0.5; }
+  #composer #send:disabled { opacity: 0.4; cursor: default; }
   /* skill hover preview */
   #skillPop {
     position: fixed;
@@ -876,8 +996,10 @@
     /* The control row (model, price, think, persona, Map, theme, Logout) is
        wider than a phone; wrap it instead of pushing Logout off-screen. */
     header > div:last-child { flex-wrap: wrap; justify-content: flex-end; }
-    #chat { padding: 12px; }
-    form#composer { padding: 8px 12px; }
+    :root { --gutter: 14px; }
+    #chat { padding-top: 20px; gap: 22px; }
+    .msg.user { max-width: 90%; }
+    #composer .hint { display: none; }
     #graphModal { padding: 0; }
     #graphModal .card { border-radius: 0; border: none; }
     #graphModal .gm-legend { display: none; }
@@ -1038,10 +1160,11 @@
     <form id="composer">
       <div id="attachBar"></div>
       <div class="composer-row">
-        <button type="button" id="attachBtn" title="Attach files (PDF, image, spreadsheet, text)">📎</button>
-        <textarea id="input" placeholder="Type your message…" rows="2"></textarea>
+        <button type="button" id="attachBtn" title="Attach files (PDF, image, spreadsheet, text)" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5 12.6 19.9a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg></button>
+        <textarea id="input" placeholder="Message…" rows="1"></textarea>
         <button type="submit" id="send">Send</button>
       </div>
+      <div class="hint">Enter to send · Shift+Enter for a new line</div>
       <input type="file" id="fileInput" multiple hidden
              accept=".pdf,.txt,.md,.csv,.tsv,.json,.xml,.yaml,.yml,.log,.xlsx,image/*" />
     </form>
@@ -1264,6 +1387,17 @@ function renderBadges(loaded, tokens, meta) {
   return parts.length ? `<div class="badges">${parts.join("")}</div>` : "";
 }
 
+// Answers saved before the server stopped joining search-split text with a
+// blank line carry one wherever a citation cut a sentence ("fails,\n\na
+// majority"). A comma, a blank line, then a lowercase word is never a real
+// paragraph break, so rejoin those for display. Fenced code is left alone.
+function healSplitSentences(text) {
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((seg, i) => (i % 2 ? seg : seg.replace(/,[ \t]*\n[ \t]*\n\s*(?=[a-z])/g, ", ")))
+    .join("");
+}
+
 // Render agent markdown → sanitized HTML. Falls back to plain text if the
 // libs failed to load (offline CDN) so messages never silently vanish.
 function renderMarkdown(el, text) {
@@ -1271,13 +1405,40 @@ function renderMarkdown(el, text) {
     el.textContent = text;
     return;
   }
-  const html = marked.parse(text || "", { gfm: true, breaks: true });
+  const html = marked.parse(healSplitSentences(text || ""), { gfm: true, breaks: true });
   el.innerHTML = DOMPurify.sanitize(html);
   el.classList.add("md");
   for (const a of el.querySelectorAll("a")) {
     a.target = "_blank";
     a.rel = "noopener noreferrer";
   }
+}
+
+const COPY_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>';
+
+// The row under an answer: a copy button (copies the raw markdown), then the
+// loaded-skill and token badges when the turn reported them.
+function appendFoot(div, text, loaded, tokens, meta) {
+  const foot = document.createElement("div");
+  foot.className = "msg-foot";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "copy-btn";
+  copy.title = "Copy answer as markdown";
+  copy.innerHTML = `${COPY_ICON}<span>Copy</span>`;
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(text || "");
+      copy.querySelector("span").textContent = "Copied";
+    } catch (e) {
+      copy.querySelector("span").textContent = "Copy failed";
+    }
+    setTimeout(() => { copy.querySelector("span").textContent = "Copy"; }, 1500);
+  };
+  foot.appendChild(copy);
+  if (loaded) foot.insertAdjacentHTML("beforeend", renderBadges(loaded, tokens, meta));
+  div.appendChild(foot);
+  return foot;
 }
 
 function appendMessage(role, text, loaded = null, tokens = null, meta = null) {
@@ -1287,10 +1448,10 @@ function appendMessage(role, text, loaded = null, tokens = null, meta = null) {
   const body = div.querySelector(".body");
   if (role === "agent") {
     renderMarkdown(body, text);
+    appendFoot(div, text, loaded, tokens, meta);
   } else {
     body.textContent = text;
   }
-  if (loaded) div.insertAdjacentHTML("beforeend", renderBadges(loaded, tokens, meta));
   $("chat").appendChild(div);
   $("chat").scrollTop = $("chat").scrollHeight;
 }
@@ -1846,6 +2007,7 @@ function createPending() {
   const t0 = performance.now();
   let mark = t0;
   let cur = null;
+  let foot = null;
   // Close off the running step: stamp how long it took, drop the highlight.
   const stamp = () => {
     if (!cur) return;
@@ -1883,8 +2045,18 @@ function createPending() {
       div.classList.remove("steps-open");
       toggle.setAttribute("aria-expanded", "false");
       renderMarkdown(body, answer);
-      if (loaded) div.insertAdjacentHTML("beforeend", renderBadges(loaded, tokens, meta));
+      foot = appendFoot(div, answer, loaded, tokens, meta);
       $("chat").scrollTop = $("chat").scrollHeight;
+    },
+    // Memory edits this turn made, shown with the answer they came from.
+    note(edits) {
+      const target = foot || div;
+      target.insertAdjacentHTML(
+        "beforeend",
+        `<div class="badges">${edits
+          .map((e) => `<span class="badge act">memory: ${escapeHtml(e)}</span>`)
+          .join("")}</div>`,
+      );
     },
     // Failure keeps the steps open — the last one is where it died.
     fail(text) {
@@ -1983,15 +2155,7 @@ async function send(message) {
     } else if (finalEvent) {
       pending.finish(finalEvent.answer, finalEvent.loaded, finalEvent.tokens, finalEvent.meta);
       if (finalEvent.image && finalEvent.image.b64) appendImage(finalEvent.image);
-      if (finalEvent.edits && finalEvent.edits.length) {
-        const note = document.createElement("div");
-        note.className = "badges";
-        note.style.alignSelf = "flex-start";
-        note.innerHTML = finalEvent.edits
-          .map((e) => `<span class="badge act">memory: ${escapeHtml(e)}</span>`)
-          .join("");
-        $("chat").appendChild(note);
-      }
+      if (finalEvent.edits && finalEvent.edits.length) pending.note(finalEvent.edits);
       turnsThisSession += 1;
       refreshSidebar();
     } else {
@@ -2202,8 +2366,17 @@ $("composer").addEventListener("submit", (e) => {
   const v = $("input").value.trim();
   if (!v) return;
   $("input").value = "";
+  autosizeInput();
   send(v);
 });
+
+// Grow the composer with its content; CSS max-height caps it and scrolls.
+function autosizeInput() {
+  const el = $("input");
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
+$("input").addEventListener("input", autosizeInput);
 
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
