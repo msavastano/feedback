@@ -34,6 +34,10 @@ python agent.py --consolidate --dry-run
 python agent.py --backfill-archive-descriptions --dry-run
 python agent.py --backfill-archive-descriptions --all-users
 
+# CLI writing persona (personas/<name>/SKILL.md), appended to every respond()
+# call while set. Switch mid-session with `/persona <name>` or `/persona off`.
+$env:AGENT_PERSONA = "elements-of-style"
+
 # debug: dump raw LLM JSON from reflect/session calls
 $env:AGENT_DEBUG = "1"
 
@@ -117,6 +121,14 @@ GROUP BY 1 ORDER BY picks DESC;
 7. **apply** — `apply_edits()` writes files. `_strip_leading_frontmatter()` defends against the model embedding a YAML block inside `body`. Every skill update/delete snapshots the pre-image row into the `skill_versions` table (write-only audit trail; recover via SQL).
 
 `run_turn_events` is a generator yielding `{stage, msg, ...}` dicts; the server streams these as NDJSON. `run_turn` drains it for CLI.
+
+### Personas (selectable writing style)
+
+A persona is a skill the user turns on per request, not a memory. It lives in the repo as `personas/<name>/SKILL.md` (same frontmatter + markdown shape as a Claude skill, so one can be dropped in as is; the directory name must equal the frontmatter `name`). `load_personas()` reads them once per process. Personas are not per-user, not in Postgres, never offered to the picker, and never touched by reflect or consolidation.
+
+Selection rides on `UserCtx.persona` (`resolve_persona()` lowercases; an unknown name means no persona, like an unknown model). Web: the header's **persona** dropdown (list from `/api/me` `personas`, choice kept in `localStorage`) sends `persona` in the `/api/chat` body. CLI: `AGENT_PERSONA`, or `/persona <name>` / `/persona off` mid-session. `respond()` appends the body to the system prompt *after* the loaded skills, and tells the model it wins over any conflicting response-style rule, so a system-tier style skill does not cancel it. Only `respond` gets it: pick / archive / reflect / session-summary run without it, and the image fast path ignores it. The choice shows as a `persona:` badge (`loaded.persona` on the `respond`/`done` events) and is recorded as `turns.picked->>'persona'` on model rows.
+
+`elements-of-style` is adapted from the uploaded Strunk and White skill: the trigger-phrase "When to Use" became always-on (the user already chose it), and code, quotes, and data are exempt. The skill's `references/Strunk_White.pdf` (a transcript of the copyrighted 4th edition, ~1.6 MB) is deliberately not shipped. [test_personas.py](test_personas.py) covers loading, resolution, prompt placement, and the run_turn wiring.
 
 ### Session-only attachments
 
