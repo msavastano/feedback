@@ -195,6 +195,9 @@ class UserCtx:
     # Optional per-request thinking level (minimal|low|medium|high). None =>
     # fall back to AGENT_THINKING_LEVEL env / per-model default in respond().
     thinking_level: str | None = None
+    # Optional per-request persona (personas/<name>/SKILL.md). None => no
+    # persona; an unknown name also resolves to None.
+    persona: str | None = None
 
     def __post_init__(self) -> None:
         validate_user_id(self.user_id)
@@ -202,6 +205,7 @@ class UserCtx:
             self.model = MODEL
         name = (self.thinking_level or "").strip().lower()
         self.thinking_level = name if name in THINKING_LEVEL_NAMES else None
+        self.persona = resolve_persona(self.persona)
 
 
 def get_secret_key() -> bytes:
@@ -294,6 +298,63 @@ def split_sections(body: str) -> list[tuple[str, str]]:
         content = parts[i + 1] if i + 1 < len(parts) else ""
         out.append((heading, f"{heading}\n{content.strip()}"))
     return out
+
+
+# ---------- personas ----------
+#
+# A persona is a writing-style skill the user opts into per request (web: the
+# "persona" dropdown; CLI: AGENT_PERSONA or /persona). Unlike memory skills it
+# is not per-user, not in Postgres, not offered to the picker, and never edited
+# by reflect: it ships in the repo as personas/<name>/SKILL.md (the same
+# frontmatter + markdown shape as a Claude skill, so one can be dropped in as
+# is) and is appended to the respond() system prompt only while selected.
+
+PERSONAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "personas")
+_PERSONA_CACHE: dict[str, Skill] | None = None
+
+
+def load_personas() -> dict[str, Skill]:
+    """{name: Skill} for every personas/<name>/SKILL.md. Read once per process.
+    A file that fails to parse is skipped and logged, never fatal."""
+    global _PERSONA_CACHE
+    if _PERSONA_CACHE is not None:
+        return _PERSONA_CACHE
+    import yaml
+    out: dict[str, Skill] = {}
+    try:
+        entries = sorted(os.listdir(PERSONAS_DIR))
+    except OSError:
+        entries = []
+    for entry in entries:
+        path = os.path.join(PERSONAS_DIR, entry, "SKILL.md")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                m = FRONTMATTER_RE.match(f.read())
+            fm = (yaml.safe_load(m.group(1)) or {}) if m else {}
+            name = str(fm.get("name") or entry).strip()
+            body = m.group(2).strip() if m else ""
+            if not body or name != entry:
+                print(f"[persona skipped] {entry}: empty body or name mismatch")
+                continue
+            out[name] = Skill(
+                name=name,
+                description=str(fm.get("description") or "").strip(),
+                body=body,
+                tier="persona",
+            )
+        except (OSError, yaml.YAMLError) as e:
+            print(f"[persona skipped] {entry}: {e}")
+    _PERSONA_CACHE = out
+    return out
+
+
+def resolve_persona(name: str | None) -> str | None:
+    """Canonical persona name, or None when unset/unknown (unknown = no persona,
+    the same quiet fallback UserCtx applies to an unknown model)."""
+    key = (name or "").strip().lower()
+    return key if key in load_personas() else None
 
 
 # ---------- session IO ----------
@@ -896,6 +957,7 @@ def respond(
     allow_code_execution: bool = False,
     thinking_level: str | None = None,
     attachments: list[Attachment] | None = None,
+    persona: Skill | None = None,
 ) -> tuple[str, dict]:
     """Main answer. Has web-search grounding (Gemini google_search / Anthropic
     server-side web_search) and, on Gemini, optional code execution. Attachments
@@ -939,6 +1001,15 @@ def respond(
             "\n\nThe user attached files to this message (documents, images, "
             "or spreadsheet data). They are included with the message — read "
             "them and answer based on their actual content."
+        )
+    if persona:
+        # Last, so it is the final word on HOW to write. Loaded skills still
+        # decide WHAT is true about the user; the persona only shapes the prose.
+        sys_prompt += (
+            f"\n\nPERSONA: {persona.name} (selected by the user). Write your "
+            "whole answer under the rules below. Where they conflict with a "
+            "response-style rule in the loaded skills, these rules win for "
+            f"this answer.\n\n{persona.body.strip()}"
         )
     history = _prune_history_base64(history)
     return _chat_respond(
@@ -1941,11 +2012,13 @@ def run_turn_events(
         )
         archive_excerpts.append((s, excerpt))
 
+    persona = load_personas().get(ctx.persona) if ctx.persona else None
     loaded_summary = {
         "system": [s.name for s in system_skills],
         "active": [s.name for s in active_loaded],
         "archive": [s.name for s, _ in archive_excerpts],
         "scores": scores,
+        "persona": persona.name if persona else None,
     }
     yield {
         "stage": "respond",
@@ -1968,6 +2041,7 @@ def run_turn_events(
         allow_code_execution=allow_code_execution,
         thinking_level=ctx.thinking_level,
         attachments=attachments,
+        persona=persona,
     )
 
     yield {"stage": "persist", "msg": "Saving turn to session log…"}
@@ -1984,6 +2058,7 @@ def run_turn_events(
         picked={
             "scores": scores,
             "catalog": len(skills) - len(system_skills),
+            **({"persona": persona.name} if persona else {}),
         },
     )
 
@@ -2107,7 +2182,11 @@ def main() -> None:
     # AGENT_MODEL lets the CLI exercise either provider; invalid values fall back
     # to MODEL via UserCtx.__post_init__. Only the chosen provider's key is
     # required at startup.
-    ctx = UserCtx(user_id=user_id, model=os.environ.get("AGENT_MODEL") or MODEL)
+    ctx = UserCtx(
+        user_id=user_id,
+        model=os.environ.get("AGENT_MODEL") or MODEL,
+        persona=os.environ.get("AGENT_PERSONA"),
+    )
     has_gemini = bool(
         os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     )
@@ -2128,8 +2207,10 @@ def main() -> None:
     code_exec = _code_exec_enabled()
     print(f"Agent ready ({ctx.model}). User: {user_id}. Session: {session_id}")
     print(f"Code execution: {'on' if code_exec else 'off'} (AGENT_CODE_EXEC)")
+    print(f"Persona: {ctx.persona or 'none'} (AGENT_PERSONA; available: "
+          f"{', '.join(load_personas()) or 'none'})")
     print("Type prompt. /attach <path> to add a file (pdf/image/xlsx/csv/text), "
-          "/detach to clear. Ctrl-C to exit.\n")
+          "/detach to clear. /persona <name> or /persona off. Ctrl-C to exit.\n")
 
     attachments: list[Attachment] = []
     while True:
@@ -2166,6 +2247,18 @@ def main() -> None:
             attachments = []
             print("[attachments cleared]")
             continue
+        if prompt == "/persona" or prompt.startswith("/persona "):
+            arg = prompt[len("/persona"):].strip()
+            if arg and arg.lower() not in ("off", "none"):
+                if not resolve_persona(arg):
+                    print(f"[unknown persona: {arg}; available: "
+                          f"{', '.join(load_personas()) or 'none'}]")
+                    continue
+                ctx.persona = resolve_persona(arg)
+            elif arg:
+                ctx.persona = None
+            print(f"[persona: {ctx.persona or 'none'}]")
+            continue
 
         result = run_turn(
             clients, ctx, session_id, prompt,
@@ -2184,6 +2277,8 @@ def main() -> None:
             tier_summary.append(f"active:{named(result.loaded_active)}")
         if result.loaded_archive:
             tier_summary.append(f"archive:{named(result.loaded_archive)}")
+        if ctx.persona:
+            tier_summary.append(f"persona:{ctx.persona}")
         print(f"[loaded {' | '.join(tier_summary) if tier_summary else 'nothing'}]")
 
         print(f"\nagent> {result.answer}\n")

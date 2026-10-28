@@ -43,6 +43,7 @@ from agent import (
     delete_skill,
     get_secret_key,
     list_sessions,
+    load_personas,
     load_skills,
     new_session,
     prepare_attachments,
@@ -209,6 +210,12 @@ def api_me(user_id: str = Depends(current_user)) -> dict:
         "pricing": PRICING,
         "allowed_thinking_levels": list(THINKING_LEVEL_NAMES.keys()),
         "thinking_capable_models": list(THINKING_CAPABLE_MODELS),
+        # Selectable writing personas (personas/<name>/SKILL.md), for the UI's
+        # persona dropdown. Bodies stay server-side.
+        "personas": [
+            {"name": p.name, "description": p.description}
+            for p in load_personas().values()
+        ],
     }
 
 
@@ -225,6 +232,8 @@ class ChatBody(BaseModel):
     session_id: str | None = None
     model: str | None = None
     thinking_level: str | None = None
+    # Optional persona name (personas/<name>/SKILL.md). Unknown => no persona.
+    persona: str | None = None
     # Session-only uploads: bytes go to Gemini for this turn, never to the DB.
     attachments: list[ChatAttachment] | None = None
 
@@ -239,7 +248,10 @@ def api_chat(
     """NDJSON stream of stage events. First line: {session_id}. Last: {stage:'done', ...}."""
     chosen = body.model if body.model in ALLOWED_MODELS else MODEL
     ctx = UserCtx(
-        user_id=user_id, model=chosen, thinking_level=body.thinking_level
+        user_id=user_id,
+        model=chosen,
+        thinking_level=body.thinking_level,
+        persona=body.persona,
     )
     # Require the key for the chosen model's provider. 400 (the UI treats it as
     # "supply your key"); attachment errors below use 422 to stay distinct.

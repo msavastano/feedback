@@ -313,6 +313,7 @@
   .badge.sys { color: var(--c-sys); }
   .badge.act { color: var(--c-act); }
   .badge.arc { color: var(--c-arc); }
+  .badge.per { color: var(--text); font-style: italic; }
   .badge.tok { color: var(--text-mute); }
   .badge.meta { color: var(--text-3); }
   aside .stats {
@@ -872,6 +873,9 @@
       white-space: nowrap;
     }
     header select { max-width: 110px; }
+    /* The control row (model, price, think, persona, Map, theme, Logout) is
+       wider than a phone; wrap it instead of pushing Logout off-screen. */
+    header > div:last-child { flex-wrap: wrap; justify-content: flex-end; }
     #chat { padding: 12px; }
     form#composer { padding: 8px 12px; }
     #graphModal { padding: 0; }
@@ -1024,6 +1028,7 @@
         <select id="modelSelect" title="Select model"></select>
         <span id="modelPrice" style="font-size:12px;opacity:.7;white-space:nowrap" title="Price of the selected model, per 1M tokens"></span>
         <select id="thinkingSelect" title="Thinking level"></select>
+        <select id="personaSelect" title="Writing persona, added to every message while selected"></select>
         <button id="graphBtn" type="button" title="Skill map — which skills get retrieved, and which get retrieved together">Map</button>
         <button id="themeToggle" type="button" title="Toggle light/dark"><span class="icon-light">☀</span><span class="icon-dark">☾</span></button>
         <button id="logout">Logout</button>
@@ -1050,6 +1055,8 @@ const MODEL_STORAGE_KEY = "agent_model";
 // Empty string = "Auto" (server falls back to env / per-model default).
 const DEFAULT_THINKING = "";
 const THINKING_STORAGE_KEY = "agent_thinking";
+// Empty string = no persona. Otherwise a name from /api/me `personas`.
+const PERSONA_STORAGE_KEY = "agent_persona";
 // Gemini key lives only in sessionStorage: it survives reloads within the tab
 // but is erased when the tab/browser closes — matching "lasts as long as the
 // browser session." Never persisted to localStorage or the server.
@@ -1090,6 +1097,7 @@ let me = null;
 let turnsThisSession = 0;
 let currentModel = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
 let currentThinking = localStorage.getItem(THINKING_STORAGE_KEY) ?? DEFAULT_THINKING;
+let currentPersona = localStorage.getItem(PERSONA_STORAGE_KEY) || "";
 // Models whose "think" dropdown does anything server-side (agent.THINKING_CAPABLE_MODELS).
 // Other models (e.g. claude-sonnet-5, which 400s on manual thinking config) show "NA".
 let thinkingCapableModels = [];
@@ -1245,6 +1253,7 @@ function renderBadges(loaded, tokens, meta) {
   for (const n of loaded.system || []) parts.push(`<span class="badge sys">sys:${n}</span>`);
   for (const n of loaded.active || []) parts.push(`<span class="badge act">act:${n}${s(n)}</span>`);
   for (const n of loaded.archive || []) parts.push(`<span class="badge arc">arc:${n}${s(n)}</span>`);
+  if (loaded.persona) parts.push(`<span class="badge per">persona:${escapeHtml(loaded.persona)}</span>`);
   if (tokens && tokens.total) {
     parts.push(`<span class="badge tok">in:${tokens.in} out:${tokens.out} total:${tokens.total}</span>`);
   }
@@ -1930,6 +1939,7 @@ async function send(message) {
         message,
         model: currentModel,
         thinking_level: currentThinking || null,
+        persona: currentPersona || null,
         attachments: sessionAttachments.length
           ? sessionAttachments.map((a) => ({ name: a.name, mime: a.mime, data: a.data }))
           : null,
@@ -2072,6 +2082,7 @@ async function init() {
   modelPricing = me.pricing || {};
   initModelSelect(me.allowed_models || [DEFAULT_MODEL]);
   initThinkingSelect(me.allowed_thinking_levels || []);
+  initPersonaSelect(me.personas || []);
   await refreshSidebar();
   let stored = null;
   try { stored = localStorage.getItem(SESSION_STORAGE_KEY); } catch (e) {}
@@ -2135,6 +2146,30 @@ function initThinkingSelect(allowed) {
   sel.onchange = () => {
     currentThinking = sel.value;
     localStorage.setItem(THINKING_STORAGE_KEY, currentThinking);
+  };
+}
+
+function initPersonaSelect(personas) {
+  const sel = $("personaSelect");
+  // Hide the control entirely when the server ships no personas.
+  sel.style.display = personas.length ? "" : "none";
+  if (!personas.some((p) => p.name === currentPersona)) {
+    currentPersona = "";
+    try { localStorage.setItem(PERSONA_STORAGE_KEY, currentPersona); } catch (e) {}
+  }
+  sel.innerHTML = "";
+  const opts = [{ name: "", description: "No persona: the default response style." }].concat(personas);
+  for (const p of opts) {
+    const opt = document.createElement("option");
+    opt.value = p.name;
+    opt.textContent = "persona: " + (p.name || "none");
+    opt.title = p.description || "";
+    if (p.name === currentPersona) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.onchange = () => {
+    currentPersona = sel.value;
+    try { localStorage.setItem(PERSONA_STORAGE_KEY, currentPersona); } catch (e) {}
   };
 }
 
